@@ -158,7 +158,7 @@ def create_tables(conn: Any) -> None:
             loan_date VARCHAR(32) NOT NULL DEFAULT '' COMMENT '贷款日：贷款发放日/借款日，标准化为YYYY-MM-DD',
             due_date VARCHAR(32) NOT NULL DEFAULT '' COMMENT '到期日：最后还款日/到期日，标准化为YYYY-MM-DD',
             litigation_status VARCHAR(255) NOT NULL DEFAULT '' COMMENT '诉讼状态：案件状态/执行状态/债权状态',
-            assignee TEXT COMMENT '受让方：接收方、买受人、购买方或债权受让主体',
+            assignee TEXT COMMENT '受让方：接收方、买受人、购买方、X持有Y结构中的Y部分或债权受让主体',
             transferor TEXT COMMENT '转让方：出让方、委托方、委托人、出包方或原债权转让主体',
             amount_basis VARCHAR(255) NOT NULL DEFAULT '' COMMENT '金额口径：本金、借款金额、本息合计等来源口径',
             confidence DECIMAL(6,4) NULL COMMENT '模型对该行抽取的置信度，0到1',
