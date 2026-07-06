@@ -1,0 +1,9 @@
+.env
+*.sqlite
+*.sqlite3
+*.db
+outputs/
+__pycache__/
+*.pyc
+*.log
+_page_output.html
