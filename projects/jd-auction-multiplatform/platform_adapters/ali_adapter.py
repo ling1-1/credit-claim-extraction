@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+﻿
 import json
 import hashlib
 import os
@@ -13,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from jd.ai_extractor import AIExtractionContext
+from jd.ai_extractor import AIExtractionContext, AI_DETAIL_TEXT_LIMIT
 
 
 ALI_SOURCE_PLATFORM = "ali"
@@ -36,6 +35,138 @@ ALI_ASSET_GROUP_LABELS = {
     "usufruct": "用益物权",
     "other": "其他",
 }
+
+
+@dataclass(frozen=True)
+class AliListChannel:
+    key: str
+    label: str
+    asset_group: str
+    page_id: int
+    scene_code: str = ""
+    spm: str = ""
+    module_id: str = ALI_LIST_MODULE_ID
+    page_size: int = 60
+    url: str = ""
+    fcat_v4_ids: tuple[str, ...] = ()
+
+
+ALI_DEFAULT_CHANNEL = AliListChannel(
+    key="default",
+    label="阿里拍卖",
+    asset_group="other",
+    page_id=ALI_LIST_PAGE_ID,
+    url="https://zc-paimai.taobao.com/",
+)
+
+ALI_REAL_ESTATE_CHANNEL = AliListChannel(
+    key="real_estate",
+    label="房地产",
+    asset_group="real_estate",
+    page_id=1410667,
+    scene_code="20200713C5R32B6N",
+    spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-1-1",
+    url=(
+        "https://zc-paimai.taobao.com/wow/pm/default/pc/4b80fa"
+        "?spm=a2129.27064540.puimod-zc-focus-2021_2860107850.category-1-1"
+    ),
+)
+
+ALI_LIST_CHANNELS = (
+    AliListChannel(key="zspl_zz", label="住宅用房", asset_group="real_estate",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206060601",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="zspl_sy", label="商业用房", asset_group="real_estate",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206057102",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="zspl_gy", label="工业用房", asset_group="real_estate",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206051702",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="zspl_qt", label="其他用房", asset_group="real_estate",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206060701","206060202"),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="cl", label="机动车", asset_group="vehicle",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206053405",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="cb", label="船舶", asset_group="vehicle",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206067401",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="qtjtgj", label="其他交通工具", asset_group="vehicle",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206137507","206146502","206149901"),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="gq", label="股权", asset_group="equity",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206067201",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="zq", label="债权", asset_group="debt",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206067301",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="td", label="土地", asset_group="land",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206067101",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="kq", label="矿权", asset_group="usufruct",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206068001",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="lq", label="林权", asset_group="usufruct",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206067901",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="jxsb", label="机械设备", asset_group="equipment",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206067001",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="zjgc", label="在建工程", asset_group="other",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206146002",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="hy", label="海域", asset_group="usufruct",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206146904",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="wxzc", label="无形资产", asset_group="other",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206165202",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="ylbjl", label="原材料/边角料", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206067601",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="txsb", label="通信设备", asset_group="equipment",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206149902",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="scp", label="奢侈品", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206054502",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="zbss", label="珠宝首饰", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206059902",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="wwsc", label="文玩收藏", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206080001",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="sj", label="手机", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206058004",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="dn", label="电脑", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206057705",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="qtsm", label="其他数码", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD",
+        fcat_v4_ids=("206067802","206167303","206215205","206224704","206215504","206228901","206479511"),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="jj", label="家具", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206147503",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="dq", label="电器", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206140005",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="bjj", label="白酒", asset_group="goods",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206060901",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="wjj", label="挖掘机/叉车", asset_group="equipment",
+        page_id=1910955, scene_code="20210823QCG72BUD", fcat_v4_ids=("206148603",),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    AliListChannel(key="ali_qt", label="其他", asset_group="other",
+        page_id=1910955, scene_code="20210823QCG72BUD",
+        fcat_v4_ids=("206143604","206136908","206134505","206220804","206147403","206069101","206068701",
+                     "206152901","206136704","206057702","206061101","206136406","206061001","206060102",
+                     "206051502","206072501","206071001","206139805","206059302"),
+        spm="a2129.27064540.puimod-zc-focus-2021_2860107850.category-4-5"),
+    ALI_REAL_ESTATE_CHANNEL,
+    ALI_DEFAULT_CHANNEL,
+)
 
 
 @dataclass
@@ -193,28 +324,82 @@ class AliMtopAuctionFetcher:
             }
         )
 
-    def fetch_list(self, *, limit: int = 10) -> list[AliListItem]:
-        variables = {
-            "pageId": ALI_LIST_PAGE_ID,
-            "moduleIds": ALI_LIST_MODULE_ID,
-            "context": {},
-        }
-        variables_text = json.dumps(variables, ensure_ascii=False, separators=(",", ":"))
-        payload = {
-            "dfApp": "auctionwalle",
-            "dfApiName": ALI_LIST_DF_API_NAME,
-            "dfVariables": variables_text,
-            "dfUniqueId": f"{ALI_LIST_PAGE_ID}.{ALI_LIST_MODULE_ID}",
-            "dfVariablesRecover": variables_text,
-        }
-        response = self._call_mtop(
+    def fetch_list(
+        self,
+        *,
+        limit: int = 10,
+        channels: Optional[Iterable[AliListChannel]] = None,
+        pages_per_channel: int = 2,
+    ) -> list[AliListItem]:
+        # Warm up the session: visit the homepage once so the server sets the
+        # _m_h5_tk cookie (needed for MTOP request signing).  Without this
+        # cookie every API call returns TOKEN_EMPTY and the listing fails.
+        if not self.session.cookies.get("_m_h5_tk"):
+            try:
+                self.session.get(
+                    "https://zc-paimai.taobao.com/",
+                    timeout=self.timeout,
+                )
+            except Exception:
+                pass  # non-fatal; the first API call will report the real error
+        target_count = None if limit is None or limit <= 0 else limit
+        selected_channels = list(channels or ALI_LIST_CHANNELS)
+        max_pages = max(1, int(pages_per_channel or 1))
+        items: list[AliListItem] = []
+        seen_item_ids: set[str] = set()
+
+        for channel in selected_channels:
+            for page_no in range(1, max_pages + 1):
+                response = self._fetch_channel_page(channel, page_no)
+                scheme_list = _extract_ali_datafront_scheme_list(response)
+                metadata = _extract_ali_datafront_items_metadata(response)
+                if not scheme_list:
+                    break
+
+                for raw_item in scheme_list:
+                    item = _parse_ali_datafront_list_item(raw_item)
+                    if not item.item_id or item.item_id in seen_item_ids:
+                        continue
+                    seen_item_ids.add(item.item_id)
+                    item = _with_ali_channel_metadata(item, channel, page_no, metadata)
+                    items.append(item)
+                    if target_count is not None and len(items) >= target_count:
+                        return items
+
+                if metadata.get("hasNextPage") is False:
+                    break
+
+        return items
+
+    def _fetch_channel_page(self, channel: AliListChannel, page_no: int) -> Mapping[str, Any]:
+        if channel.key == ALI_DEFAULT_CHANNEL.key and not channel.spm:
+            variables = {
+                "pageId": channel.page_id,
+                "moduleIds": channel.module_id,
+                "context": {},
+            }
+            variables_text = json.dumps(variables, ensure_ascii=False, separators=(",", ":"))
+            payload = {
+                "dfApp": "auctionwalle",
+                "dfApiName": ALI_LIST_DF_API_NAME,
+                "dfVariables": variables_text,
+                "dfUniqueId": f"{channel.page_id}.{channel.module_id}",
+                "dfVariablesRecover": variables_text,
+            }
+        else:
+            module_ids = f"{channel.module_id}:items~keywordSource"
+            context = _build_ali_channel_context(channel, page_no)
+            payload = _build_ali_datafront_payload(
+                page_id=channel.page_id,
+                module_ids=module_ids,
+                context=context,
+                unique_module_ids=module_ids,
+            )
+        return self._call_mtop(
             "mtop.taobao.datafront.invoke.auctionwalle",
             "1.0",
             payload,
         )
-        scheme_list = _extract_ali_datafront_scheme_list(response)
-        items = [_parse_ali_datafront_list_item(item) for item in scheme_list]
-        return [item for item in items if item.item_id][:limit]
 
     def fetch_detail(self, list_item: AliListItem) -> AliDetailBundle:
         item_id = compact_item_id(list_item.item_id)
@@ -450,7 +635,7 @@ class AliBrowserProfileFetcher:
         except ImportError as exc:
             raise RuntimeError("Ali browser-profile fetching requires Playwright or Selenium.") from exc
 
-        last_error: Exception | None = None
+        last_error: Optional[Exception] = None
         for browser_name, driver_factory, options_factory in (
             ("chrome", webdriver.Chrome, webdriver.ChromeOptions),
             ("edge", webdriver.Edge, webdriver.EdgeOptions),
@@ -509,14 +694,65 @@ class AliAuctionAdapter:
     def parse_top_detail(self, json_data: Mapping[str, Any]) -> AliDetailBundle:
         return self.top_fetcher.parse_detail(json_data)
 
-    def fetch_mtop_list(self, *, limit: int = 10) -> list[AliListItem]:
-        return self.mtop_fetcher.fetch_list(limit=limit)
+    def fetch_mtop_list(
+        self,
+        *,
+        limit: int = 10,
+        channels: Optional[Iterable[AliListChannel]] = None,
+        pages_per_channel: int = 2,
+    ) -> list[AliListItem]:
+        return self.mtop_fetcher.fetch_list(
+            limit=limit,
+            channels=channels,
+            pages_per_channel=pages_per_channel,
+        )
 
     def fetch_mtop_detail(self, list_item: AliListItem) -> AliDetailBundle:
         return self.mtop_fetcher.fetch_detail(list_item)
 
     def parse_rendered_detail(self, html: str, url: str = "") -> AliDetailBundle:
         return self.browser_fetcher.parse_rendered_detail(html, url)
+
+    def merge_detail_bundles(self, primary: AliDetailBundle, fallback: AliDetailBundle) -> AliDetailBundle:
+        """Merge browser-rendered evidence into the mtop bundle without overriding stronger API values."""
+
+        if fallback.status != "ok":
+            return primary
+
+        primary.title = first_non_blank_any(primary.title, fallback.title)
+        primary.category = first_non_blank_any(primary.category, fallback.category)
+        primary.asset_location = first_non_blank_any(primary.asset_location, fallback.asset_location)
+        primary.project_status = first_non_blank_any(primary.project_status, fallback.project_status)
+        primary.signup_start_time = first_non_blank_any(primary.signup_start_time, fallback.signup_start_time)
+        primary.signup_end_time = first_non_blank_any(primary.signup_end_time, fallback.signup_end_time)
+        primary.disposal_party = first_non_blank_any(primary.disposal_party, fallback.disposal_party)
+        primary.disposal_agency = first_non_blank_any(primary.disposal_agency, fallback.disposal_agency)
+        primary.start_price_raw = first_non_blank_any(primary.start_price_raw, fallback.start_price_raw)
+        primary.final_price_raw = first_non_blank_any(primary.final_price_raw, fallback.final_price_raw)
+        primary.contact_info = first_non_blank_any(primary.contact_info, fallback.contact_info)
+        primary.special_notice = first_non_blank_any(primary.special_notice, fallback.special_notice)
+        primary.assessment_price_time = first_non_blank_any(primary.assessment_price_time, fallback.assessment_price_time)
+
+        primary.attachments = _merge_attachment_lists(primary.attachments, fallback.attachments)
+        primary.image_urls = _dedupe_texts([*primary.image_urls, *fallback.image_urls])
+        primary.rendered_html = first_non_blank_any(primary.rendered_html, fallback.rendered_html)
+        primary.rendered_text = _join_unique_sections(primary.rendered_text, fallback.rendered_text)
+        primary.page_text = _join_unique_sections(primary.page_text, fallback.page_text)
+
+        classification_text = " ".join(
+            part
+            for part in (
+                primary.category,
+                primary.title,
+                str(primary.summary_fields or ""),
+            )
+            if part
+        )
+        primary.asset_group = _classify_asset_group(primary.category, classification_text)
+        primary.asset_type = _asset_type_label(primary.asset_group, primary.category)
+        if primary.data_source and "browser" not in primary.data_source:
+            primary.data_source = f"{primary.data_source}+ali_browser_profile"
+        return primary
 
     def build_ai_context(self, bundle: AliDetailBundle) -> AIExtractionContext:
         html_key_values = {
@@ -775,7 +1011,7 @@ class AliAuctionAdapter:
         else:
             values.update(
                 {
-                    "raw_detail_text": text[:12000],
+                    "raw_detail_text": text[:AI_DETAIL_TEXT_LIMIT],
                     "raw_table_pairs_json": _safe_json_dumps(summary, max_chars=12000),
                     "extracted_summary": first_non_blank_any(bundle.title, _extract_labeled_value(text, ("标的物详情", "标的详情"))),
                 }
@@ -846,6 +1082,101 @@ def compact_item_id(value: Any) -> str:
     text = _to_text(value)
     match = re.search(r"\d{5,}", text)
     return match.group(0) if match else text
+
+
+def _build_ali_channel_context(channel: AliListChannel, page_no: int) -> dict[str, Any]:
+    item_context = {
+        "spm": channel.spm,
+        "userInfo": {},
+        "page": str(page_no),
+    }
+    if channel.fcat_v4_ids:
+        item_context["fcatV4Ids"] = list(channel.fcat_v4_ids)
+    context: dict[str, Any] = {
+        f"_b_{channel.module_id}:items": json.dumps(item_context, ensure_ascii=False, separators=(",", ":")),
+        f"_b_{channel.module_id}:keywordSource": "null",
+        "userInfo": "{}",
+        "device": "pc",
+    }
+    if channel.scene_code:
+        context["sceneCode"] = channel.scene_code
+    return context
+
+
+def _build_ali_datafront_payload(
+    *,
+    page_id: int,
+    module_ids: str,
+    context: Mapping[str, Any],
+    unique_module_ids: Optional[str] = None,
+    variables_recover: Optional[str] = None,
+) -> dict[str, Any]:
+    variables = {
+        "pageId": page_id,
+        "moduleIds": module_ids,
+        "context": dict(context),
+    }
+    variables_text = json.dumps(variables, ensure_ascii=False, separators=(",", ":"))
+    return {
+        "dfApp": "auctionwalle",
+        "dfApiName": ALI_LIST_DF_API_NAME,
+        "dfVariables": variables_text,
+        "dfUniqueId": f"{page_id}.{unique_module_ids or module_ids}",
+        "dfVariablesRecover": variables_recover if variables_recover is not None else "{}",
+    }
+
+
+def _extract_ali_datafront_items_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
+    def walk(value: Any, path: str = "") -> Optional[dict[str, Any]]:
+        if isinstance(value, Mapping):
+            if path.endswith(".items") and isinstance(value.get("schemeList"), list):
+                return {
+                    "pageSize": value.get("pageSize"),
+                    "totalCount": value.get("totalCount"),
+                    "hasNextPage": value.get("hasNextPage"),
+                }
+            for key, child in value.items():
+                next_path = f"{path}.{key}" if path else str(key)
+                found = walk(child, next_path)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for index, child in enumerate(value[:5]):
+                found = walk(child, f"{path}[{index}]")
+                if found is not None:
+                    return found
+        return None
+
+    return walk(payload) or {}
+
+
+def _with_ali_channel_metadata(
+    item: AliListItem,
+    channel: AliListChannel,
+    page_no: int,
+    metadata: Mapping[str, Any],
+) -> AliListItem:
+    category_lower = (item.category or "").strip().lower()
+    if not item.category or category_lower in {"gov", "sf", "zc", "pm", "auction"}:
+        item.category = channel.label
+    if channel.asset_group and channel.asset_group != "other":
+        item.asset_group = channel.asset_group
+
+    raw = dict(item.raw or {})
+    raw["_ali_channel"] = {
+        "key": channel.key,
+        "label": channel.label,
+        "asset_group": channel.asset_group,
+        "pageId": channel.page_id,
+        "moduleId": channel.module_id,
+        "page": page_no,
+        "pageSize": metadata.get("pageSize"),
+        "totalCount": metadata.get("totalCount"),
+        "hasNextPage": metadata.get("hasNextPage"),
+        "url": channel.url,
+    }
+    item.raw = raw
+    return item
 
 
 def _extract_ali_datafront_scheme_list(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -949,12 +1280,6 @@ def _parse_ali_mtop_detail(
         _extract_special_notice_from_text(description_text),
         _extract_special_notice_from_text(notice_text),
     )
-    asset_location = first_non_blank_any(
-        detail_data.get("auctionAddress"),
-        detail_data.get("location"),
-        summary_fields.get("精简位置"),
-        list_item.asset_location,
-    )
     top_json = {
         "detail": detail_json,
         "description": description_json,
@@ -962,7 +1287,16 @@ def _parse_ali_mtop_detail(
         "summary": summary_json,
         "notice": notice_json,
     }
-    asset_group = _classify_asset_group(category, " ".join([title, description_text, str(summary_fields)]))
+    asset_group = _classify_asset_group(category, " ".join([title, str(summary_fields)]))
+    asset_location = _best_ali_asset_location(
+        asset_group=asset_group,
+        title=title,
+        detail_data=detail_data,
+        summary_fields=summary_fields,
+        description_text=description_text,
+        notice_text=notice_text,
+        list_item=list_item,
+    )
 
     return AliDetailBundle(
         source_item_id=item_id,
@@ -1033,17 +1367,117 @@ def _summary_field_map(summary_json: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _ali_attachments(payload: Mapping[str, Any]) -> list[dict[str, str]]:
-    attaches = _find_first_value(payload, ("attaches", "attachments", "attachList"))
+    attaches = _find_first_value(
+        payload,
+        (
+            "attaches",
+            "attachments",
+            "attachList",
+            "fileList",
+            "files",
+            "materialList",
+            "resourceList",
+            "downloadList",
+        ),
+    )
     result: list[dict[str, str]] = []
     if isinstance(attaches, list):
         for attach in attaches:
             if not isinstance(attach, Mapping):
                 continue
-            title = _to_text(attach.get("title") or attach.get("name"))
-            attach_id = _to_text(attach.get("id") or attach.get("fileId"))
-            url = _normalize_url(_to_text(attach.get("url") or attach.get("downloadUrl")))
-            result.append({"name": title or attach_id, "url": url, "id": attach_id, "fileType": _to_text(attach.get("fileType"))})
+            result.append(_attachment_from_mapping(attach))
+    elif isinstance(attaches, Mapping):
+        result.append(_attachment_from_mapping(attaches))
+
+    # Some Ali responses bury the files under arbitrary nested keys. Walk the
+    # payload as a fallback so names and URLs are not silently lost.
+    for attach in _walk_attachment_mappings(payload):
+        result.append(_attachment_from_mapping(attach))
+    return _merge_attachment_lists(result)
+
+
+def _attachment_from_mapping(attach: Mapping[str, Any]) -> dict[str, str]:
+    title = _to_text(
+        first_non_blank_any(
+            attach.get("title"),
+            attach.get("name"),
+            attach.get("fileName"),
+            attach.get("attachmentName"),
+            attach.get("materialName"),
+        )
+    )
+    attach_id = _to_text(
+        first_non_blank_any(
+            attach.get("id"),
+            attach.get("fileId"),
+            attach.get("attachmentId"),
+            attach.get("resourceId"),
+        )
+    )
+    url = _normalize_url(
+        _to_text(
+            first_non_blank_any(
+                attach.get("url"),
+                attach.get("downloadUrl"),
+                attach.get("downloadURL"),
+                attach.get("fileUrl"),
+                attach.get("fileURL"),
+                attach.get("attachmentUrl"),
+                attach.get("href"),
+                attach.get("link"),
+                attach.get("resourceUrl"),
+            )
+        )
+    )
+    return {
+        "name": title or attach_id or url,
+        "url": url,
+        "id": attach_id,
+        "fileType": _to_text(first_non_blank_any(attach.get("fileType"), attach.get("type"), attach.get("suffix"))),
+    }
+
+
+def _walk_attachment_mappings(value: Any) -> Iterable[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        keys = {str(key).lower() for key in value}
+        if (
+            keys & {"url", "downloadurl", "fileurl", "attachmenturl", "href", "link", "resourceurl"}
+            and keys & {"name", "title", "filename", "attachmentname", "materialname"}
+        ) or keys & {"fileid", "attachmentid", "resourceid"}:
+            yield value
+        for child in value.values():
+            yield from _walk_attachment_mappings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_attachment_mappings(child)
+
+
+def _merge_attachment_lists(*lists: Iterable[Any]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for items in lists:
+        for item in items or []:
+            if not isinstance(item, Mapping):
+                continue
+            normalized = _attachment_from_mapping(item)
+            key = (normalized.get("url", ""), normalized.get("id", ""), normalized.get("name", ""))
+            if not any(key) or key in seen:
+                continue
+            seen.add(key)
+            result.append(normalized)
     return result
+
+
+def _join_unique_sections(*sections: str) -> str:
+    result: list[str] = []
+    seen: set[str] = set()
+    for section in sections:
+        text = _compact_text(section)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(section.strip())
+    return "\n\n".join(result)
 
 
 def _ali_image_urls(detail_data: Mapping[str, Any]) -> list[str]:
@@ -1089,6 +1523,9 @@ def _extract_special_notice_from_text(text: str) -> str:
         r"(特别提示[:：\s][\s\S]{0,1200})",
         r"(重要提示[:：\s][\s\S]{0,1200})",
         r"(风险提示[:：\s][\s\S]{0,1200})",
+        r"((?:网上交保参与竞价)?注意事项[:：\s][\s\S]{0,1200})",
+        r"(特别说明[:：\s][\s\S]{0,1200})",
+        r"(特别声明[:：\s][\s\S]{0,1200})",
     )
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -1128,16 +1565,116 @@ def _ali_assessment_price_display(
 ) -> Optional[str]:
     for label in ("评估价", "市场价", "参考价"):
         value = summary_fields.get(label)
-        if value:
+        if value and not _is_zero_price_value(value):
             return _ensure_yuan_suffix(value)
     labeled_value = _find_labeled_value(summary_json, ("评估价", "市场价", "参考价"))
-    if labeled_value:
+    if labeled_value and not _is_zero_price_value(labeled_value):
         return _ensure_yuan_suffix(labeled_value)
     for key in ("marketPrice", "consultPrice", "assessmentPrice", "evaluatedPrice"):
         display = _ali_cent_price_display(_find_first_value(detail_data, (key,)))
-        if display:
+        if display and not _is_zero_price_value(display):
             return display
     return None
+
+
+def _best_ali_asset_location(
+    *,
+    asset_group: str,
+    title: str,
+    detail_data: Mapping[str, Any],
+    summary_fields: Mapping[str, str],
+    description_text: str,
+    notice_text: str,
+    list_item: AliListItem,
+) -> str:
+    candidates: list[Any] = []
+    if asset_group in {"real_estate", "land"}:
+        candidates.extend(
+            [
+                _extract_ali_location_phrase(description_text),
+                _extract_ali_location_phrase(notice_text),
+                _extract_ali_location_phrase(title),
+            ]
+        )
+    candidates.extend(
+        [
+            _value_by_alias(summary_fields, ("坐落", "位置", "地址", "所在地", "标的物所在地", "标的物位置")),
+            detail_data.get("auctionAddress"),
+            detail_data.get("location"),
+            summary_fields.get("精简位置"),
+            list_item.asset_location,
+        ]
+    )
+    cleaned = [_clean_ali_location(value) for value in candidates]
+    cleaned = [value for value in cleaned if value]
+    if not cleaned:
+        return ""
+    cleaned.sort(key=_ali_location_score, reverse=True)
+    return cleaned[0]
+
+
+def _extract_ali_location_phrase(text: str) -> str:
+    if not text:
+        return ""
+    normalized = re.sub(r"\s+", " ", text)
+    labeled_patterns = (
+        r"(?:(?:变卖标的|拍卖标的)|(?:竞价资产|竞买资产)|(?:标的物|标的名称))\s*[:：为]?\s*(?:位于)?([^。；;\n]{4,180})",
+        r"(?:(?:坐落|位置)|(?:地址|所在地))\s*[:：为]?\s*([^。；;\n]{4,160})",
+    )
+    for pattern in labeled_patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            value = _clean_ali_location(match.group(1))
+            if _looks_like_ali_location(value):
+                return value
+
+    for sentence in re.split(r"[。；;\n]", normalized):
+        value = _clean_ali_location(sentence)
+        if _looks_like_ali_location(value):
+            return value
+    return ""
+
+
+def _clean_ali_location(value: Any) -> str:
+    text = _compact_text(_to_text(value))
+    if not text:
+        return ""
+    text = re.sub(r"^[一二三四五六七八九十]+[、.．]\s*", "", text)
+    text = re.sub(r"^(?:(?:变卖标的|拍卖标的)|(?:竞价资产|竞买资产)|(?:标的物|标的名称))\s*[:：为]?\s*", "", text)
+    text = re.split(
+        r"(?:\[证号|【(?:证号|证号)[:：]|(?:产权证|不动产权)|(?:建筑面积|房屋面积)|(?:土地面积|面积)[:：]|(?:评估价|起拍价)|(?:保证金|增价幅度)|，|,)",
+        text,
+        maxsplit=1,
+    )[0]
+    text = re.sub(r"\s+", "", text).strip("：:，,。；;、 ")
+    return text[:160]
+
+
+def _looks_like_ali_location(value: str) -> bool:
+    text = _compact_text(value)
+    if len(text) < 6 or len(text) > 120:
+        return False
+    if re.search(r"((?:评估价|起拍价)|(?:保证金|增价幅度)|(?:联系电话|联系人)|(?:竞买人|公告))", text):
+        return False
+    address_hits = sum(1 for keyword in ("省", "市", "区", "县", "镇", "街道", "路", "街", "大道", "号", "室", "楼", "栋", "幢", "座", "小区", "花园") if keyword in text)
+    asset_hits = sum(1 for keyword in ("房", "商铺", "住宅", "储藏室", "车位", "车库", "土地", "厂房", "公寓", "写字楼") if keyword in text)
+    return address_hits >= 2 and (asset_hits >= 1 or any(keyword in text for keyword in ("路", "街", "大道", "号", "室", "楼")))
+
+
+def _ali_location_score(value: str) -> tuple[int, int]:
+    text = _compact_text(value)
+    detail_hits = sum(1 for keyword in ("路", "街", "大道", "号", "室", "楼", "栋", "幢", "座", "小区", "花园") if keyword in text)
+    region_hits = sum(1 for keyword in ("省", "市", "区", "县", "镇", "街道") if keyword in text)
+    return (detail_hits * 3 + region_hits * 2, min(len(text), 120))
+
+
+def _is_zero_price_value(value: Any) -> bool:
+    text = _compact_text(_to_text(value)).replace(",", "").replace("，", "").replace(" ", "")
+    if not text:
+        return False
+    if text in {"无", "暂无", "-", "--", "/", "不详"}:
+        return True
+    return bool(re.fullmatch(r"[￥¥]?0+(?:\.0+)?(?:(?:元|万元)|亿元)?", text))
 
 
 def _find_labeled_value(data: Any, labels: Iterable[str]) -> Optional[str]:
@@ -1163,7 +1700,7 @@ def _ensure_yuan_suffix(value: Any) -> str:
     text = _compact_text(_to_text(value))
     if not text:
         return ""
-    if re.search(r"(元|万元|亿元)$", text):
+    if re.search(r"((?:元|万元)|亿元)$", text):
         return text
     if re.fullmatch(r"[0-9][0-9,]*(?:\.[0-9]+)?", text):
         return f"{text} 元"
@@ -1440,8 +1977,8 @@ def _value_by_alias(fields: Mapping[str, str], aliases: Iterable[str]) -> str:
 
 def _extract_area_from_text(text: str) -> str:
     patterns = (
-        r"(?:建筑面积|房屋面积|套内面积|出租面积|租赁面积|土地面积|宗地面积|面积)\s*[:：为]?\s*([0-9]+(?:\.[0-9]+)?\s*(?:平方米|㎡|平米|m²|平))",
-        r"([0-9]+(?:\.[0-9]+)?\s*(?:平方米|㎡|平米|m²|平))",
+        r"(?:(?:建筑面积|房屋面积)|(?:套内面积|出租面积)|(?:租赁面积|土地面积)|(?:宗地面积|面积))\s*[:：为]?\s*([0-9]+(?:\.[0-9]+)?\s*(?:平方米|㎡|(?:平米|m²)|平))",
+        r"([0-9]+(?:\.[0-9]+)?\s*(?:平方米|㎡|(?:平米|m²)|平))",
     )
     for pattern in patterns:
         match = re.search(pattern, text or "", flags=re.I)
@@ -1452,8 +1989,8 @@ def _extract_area_from_text(text: str) -> str:
 
 def _extract_certificate_from_text(text: str) -> str:
     patterns = (
-        r"((?:粤|京|沪|津|渝|冀|豫|云|辽|黑|湘|皖|鲁|新|苏|浙|赣|鄂|桂|甘|晋|蒙|陕|吉|闽|贵|青|藏|川|宁|琼)[^，。；;\n]{0,30}(?:不动产权|房权证|产权证)[^，。；;\n]{0,40})",
-        r"(?:权证编号|权证号|不动产权证号|房产证号|土地证号|证号)\s*[:：]?\s*([^，。；;\n]{4,80})",
+        r"((?:(?:粤|京)|(?:沪|津)|(?:渝|冀)|(?:豫|云)|(?:辽|黑)|(?:湘|皖)|(?:鲁|新)|(?:苏|浙)|(?:赣|鄂)|(?:桂|甘)|(?:晋|蒙)|(?:陕|吉)|(?:闽|贵)|(?:青|藏)|(?:川|宁)|琼)[^，。；;\n]{0,30}(?:(?:不动产权|房权证)|产权证)[^，。；;\n]{0,40})",
+        r"(?:(?:权证编号|权证号)|(?:不动产权证号|房产证号)|(?:土地证号|证号))\s*[:：]?\s*([^，。；;\n]{4,80})",
     )
     for pattern in patterns:
         match = re.search(pattern, text or "")
@@ -1464,8 +2001,8 @@ def _extract_certificate_from_text(text: str) -> str:
 
 def _extract_use_term_from_text(text: str) -> str:
     patterns = (
-        r"(?:使用期限|土地使用期限|租赁期限|出租期限|承租期限)\s*[:：为]?\s*([^。；;\n]{4,120})",
-        r"([0-9]{4}年[0-9]{1,2}月[0-9]{1,2}日\s*(?:起|至|-|—|到)[^。；;\n]{4,80})",
+        r"(?:(?:使用期限|土地使用期限)|(?:租赁期限|出租期限)|承租期限)\s*[:：为]?\s*([^。；;\n]{4,120})",
+        r"([0-9]{4}年[0-9]{1,2}月[0-9]{1,2}日\s*(?:(?:起|至)|-|—|到)[^。；;\n]{4,80})",
     )
     for pattern in patterns:
         match = re.search(pattern, text or "")
@@ -1481,8 +2018,8 @@ def _extract_plate_number(text: str) -> str:
 
 def _extract_count_from_text(text: str) -> str:
     patterns = (
-        r"([0-9]+)\s*项(?:专利|商标|著作权|知识产权)?",
-        r"(?:专利|商标|著作权|知识产权)[^0-9]{0,20}([0-9]+)\s*项",
+        r"([0-9]+)\s*项(?:(?:专利|商标)|(?:著作权|知识产权))?",
+        r"(?:(?:专利|商标)|(?:著作权|知识产权))[^0-9]{0,20}([0-9]+)\s*项",
     )
     for pattern in patterns:
         match = re.search(pattern, text or "")
@@ -1537,7 +2074,7 @@ def _extract_item_id_from_url_or_html(url: str, html: str) -> str:
     for key in ("itemId", "id", "item_id"):
         if query.get(key):
             return query[key][0]
-    match = re.search(r"['\"]?(?:itemId|item_id|id)['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9_-]+)", html or "")
+    match = re.search(r"['\"]?(?:(?:itemId|item_id)|id)['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9_-]+)", html or "")
     return match.group(1) if match else ""
 
 
@@ -1589,29 +2126,375 @@ def _extract_contact_info(data: Any) -> str:
 def _classify_asset_group(category: str, title: str) -> str:
     category_text = _compact_text(category).lower()
     title_text = _compact_text(title).lower()
-    mapping = (
-        ("real_estate", ("房产", "房地产", "住宅", "商铺", "厂房", "房屋", "不动产", "公寓", "车位", "车库", "储藏室", "地下室", "车房")),
-        ("debt", ("债权", "债务", "不良资产", "应收")),
-        ("land", ("土地", "地块", "建设用地", "工业用地")),
-        ("vehicle", ("车辆", "机动车", "汽车", "货车", "客车", "轿车")),
-        ("equipment", ("设备", "机器", "机械", "生产线", "仪器")),
-        ("equity", ("股权", "股份", "出资", "公司股")),
-        ("ip", ("知识产权", "商标", "专利", "著作权", "域名")),
-        ("goods", ("物资", "存货", "商品", "货物", "原材料")),
-        ("usufruct", ("租赁权", "经营权", "使用权", "收益权", "承租权")),
+    strong_title_mapping = (
+        (
+            "debt",
+            (
+                "债权资产包",
+                "债权资产",
+                "债权转让",
+                "抵押债权",
+                "个人抵押债权",
+                "不良资产",
+                "应收账款",
+                "应收款",
+                "债务",
+            ),
+        ),
+        ("equity", ("股权转让", "公司股权", "股东权益", "合伙份额", "出资权益", "%股权")),
+        ("ip", ("知识产权", "软件著作权", "作品著作权", "著作权", "专利权", "商标权", "专利", "商标", "域名")),
+        ("usufruct", ("租赁权", "经营权", "收益权", "承租权", "采矿权", "林权", "海域使用权")),
+        ("equipment", ("挖掘机", "工程机械", "机械设备", "机器设备", "生产线", "压缩机", "切割机", "办公设备")),
+        ("goods", ("边角料", "废料", "废旧", "原材料", "存货", "物资产品", "黄铜", "塑料", "橡胶", "茅台", "翡翠")),
+        (
+            "vehicle",
+            (
+                "车牌号",
+                "牌照",
+                "发动机",
+                "车架号",
+                "排量",
+                "摩托车",
+                "三轮车",
+                "电动车",
+                "游艇",
+                "客船",
+                "船舶",
+                "奥迪",
+                "宝马",
+                "奔驰",
+                "本田",
+                "保时捷",
+                "丰田",
+                "大众",
+                "宝骏",
+            ),
+        ),
+        ("land", ("土地使用权", "建设用地使用权", "国有建设用地", "工业用地", "宗地", "地块")),
+        (
+            "real_estate",
+            (
+                "不动产",
+                "房地产",
+                "房产",
+                "商铺",
+                "住宅",
+                "写字楼",
+                "车位",
+                "地下车库",
+                "储藏室",
+                "储藏间",
+                "号楼",
+                "号房",
+                "套房",
+            ),
+        ),
     )
     category_mapping = (
-        ("debt", ("债权", "债务", "不良资产", "应收")),
-        *mapping,
+        (
+            "debt",
+            (
+                "债权资产包",
+                "债权资产",
+                "债权",
+                "债权转让",
+                "抵押债权",
+                "个人抵押债权",
+                "不良资产",
+                "应收账款",
+                "应收款",
+                "应收",
+                "债权",
+                "债务",
+            ),
+        ),
+        ("equity", ("股权", "股权转让", "股东权益", "合伙份额", "出资权益")),
+        ("ip", ("知识产权", "商标", "专利", "著作权", "软件著作权", "域名")),
+        ("land", ("土地", "地块", "建设用地", "工业用地", "土地使用权", "建设用地使用权")),
+        ("usufruct", ("租赁权", "经营权", "收益权", "承租权", "采矿权", "林权", "海域使用权")),
+        (
+            "vehicle",
+            (
+                "车辆",
+                "机动车",
+                "汽车",
+                "货车",
+                "客车",
+                "轿车",
+                "小型车",
+                "摩托车",
+                "摩托",
+                "二手车",
+                "新车",
+                "船舶",
+            ),
+        ),
+        (
+            "equipment",
+            (
+                "设备",
+                "机器",
+                "机械",
+                "生产线",
+                "仪器",
+                "工程机械",
+                "机械设备",
+                "机器设备",
+                "挖掘机",
+                "铲斗",
+                "压缩机",
+                "切割机",
+                "办公设备",
+            ),
+        ),
+        (
+            "goods",
+            (
+                "物资",
+                "存货",
+                "商品",
+                "货物",
+                "原材料",
+                "废料",
+                "边角料",
+                "废旧",
+                "塑料",
+                "黄铜",
+                "铜板",
+                "橡胶",
+                "半成品",
+                "产成品",
+                "周转箱",
+                "蓄电池",
+                "酒",
+                "茅台",
+                "翡翠",
+                "手表",
+            ),
+        ),
+        (
+            "real_estate",
+            (
+                "房产",
+                "房地产",
+                "住宅",
+                "商铺",
+                "厂房",
+                "房屋",
+                "不动产",
+                "公寓",
+                "写字楼",
+                "底商",
+                "商用房",
+                "商业用房",
+                "商业房",
+                "门面",
+                "门市",
+                "沿街",
+                "临街",
+                "商办",
+                "办公用房",
+                "车位",
+                "停车位",
+                "车库",
+                "地下车库",
+                "储藏室",
+                "储藏间",
+                "储物间",
+                "地下室",
+                "地下储藏室",
+                "号房",
+                "套房",
+                "房源",
+                "特价房",
+                "号楼",
+                "楼室",
+                "中楼层",
+                "精装修",
+                "小区",
+                "建材城",
+                "商贸城",
+                "五金城",
+                "商业城",
+                "综合市场",
+                "面积",
+                "平米",
+                "㎡",
+            ),
+        ),
     )
+    title_mapping = (
+        (
+            "debt",
+            (
+                "债权资产包",
+                "债权资产",
+                "债权转让",
+                "抵押债权",
+                "个人抵押债权",
+                "不良资产",
+                "应收账款",
+                "应收款",
+                "应收",
+                "债权",
+                "债务",
+            ),
+        ),
+        ("equity", ("股权", "股权转让", "公司股权", "股东权益", "合伙份额", "出资权益")),
+        ("ip", ("知识产权", "商标", "专利", "著作权", "软件著作权", "域名")),
+        ("land", ("土地使用权", "建设用地使用权", "国有建设用地", "工业用地", "土地", "地块")),
+        ("usufruct", ("租赁权", "经营权", "收益权", "承租权", "采矿权", "林权", "海域使用权")),
+        (
+            "real_estate",
+            (
+                "房产",
+                "房地产",
+                "住宅",
+                "商铺",
+                "厂房",
+                "房屋",
+                "不动产",
+                "公寓",
+                "写字楼",
+                "底商",
+                "商用房",
+                "商业用房",
+                "商业房",
+                "门面",
+                "门市",
+                "沿街",
+                "临街",
+                "商办",
+                "办公用房",
+                "车位",
+                "停车位",
+                "车库",
+                "地下车库",
+                "储藏室",
+                "储藏间",
+                "储物间",
+                "地下室",
+                "地下储藏室",
+                "号房",
+                "套房",
+                "房源",
+                "特价房",
+                "号楼",
+                "楼室",
+                "中楼层",
+                "精装修",
+                "小区",
+                "建材城",
+                "商贸城",
+                "五金城",
+                "商业城",
+                "综合市场",
+                "面积",
+                "平米",
+                "㎡",
+            ),
+        ),
+        (
+            "equipment",
+            (
+                "设备",
+                "机器",
+                "机械",
+                "生产线",
+                "仪器",
+                "工程机械",
+                "机械设备",
+                "机器设备",
+                "挖掘机",
+                "铲斗",
+                "压缩机",
+                "切割机",
+                "办公设备",
+            ),
+        ),
+        (
+            "vehicle",
+            (
+                "车辆",
+                "机动车",
+                "汽车",
+                "货车",
+                "客车",
+                "轿车",
+                "小型车",
+                "摩托车",
+                "摩托",
+                "二手车",
+                "新车",
+                "上牌",
+                "过户",
+                "车牌号",
+                "牌照",
+                "发动机",
+                "车架号",
+                "排量",
+                "三轮车",
+                "电动车",
+                "摩托艇",
+                "游艇",
+                "客船",
+                "船舶",
+                "奥迪",
+                "宝马",
+                "奔驰",
+                "本田",
+                "保时捷",
+                "丰田",
+                "大众",
+                "宝骏",
+            ),
+        ),
+        (
+            "goods",
+            (
+                "物资",
+                "存货",
+                "商品",
+                "货物",
+                "原材料",
+                "废料",
+                "边角料",
+                "废旧",
+                "塑料",
+                "黄铜",
+                "铜板",
+                "橡胶",
+                "半成品",
+                "产成品",
+                "周转箱",
+                "蓄电池",
+                "酒",
+                "茅台",
+                "翡翠",
+                "手表",
+            ),
+        ),
+        category_mapping[-1],
+    )
+    for group, keywords in strong_title_mapping:
+        if group == "debt" and any(token in title_text for token in ("债权投资", "债权融资")):
+            strong_debt_tokens = ("债权资产", "债权转让", "抵押债权", "不良资产", "应收", "债务")
+            if not any(token in title_text for token in strong_debt_tokens):
+                continue
+        if any(keyword.lower() in title_text for keyword in keywords):
+            return group
+    for group, keywords in title_mapping:
+        if group == "debt" and any(token in title_text for token in ("债权投资", "债权融资")):
+            strong_debt_tokens = ("债权资产", "债权转让", "抵押债权", "不良资产", "应收", "债务")
+            if not any(token in title_text for token in strong_debt_tokens):
+                continue
+        if any(keyword.lower() in title_text for keyword in keywords):
+            return group
     for group, keywords in category_mapping:
         if any(keyword.lower() in category_text for keyword in keywords):
             return group
-    for group, keywords in mapping:
-        if any(keyword.lower() in title_text for keyword in keywords):
-            return group
     combined = f"{category_text} {title_text}"
-    for group, keywords in mapping:
+    for group, keywords in title_mapping:
         if any(keyword.lower() in combined for keyword in keywords):
             return group
     return "other"

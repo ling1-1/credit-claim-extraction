@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -7,12 +8,17 @@ from jd_mysql_store import (
     MySQLJDScraperDatabase,
     V2_DROP_TABLES,
     V2_SCHEMA_PATH,
+    _debt_detail_money_decimal,
     build_v2_common_item_row,
     build_v2_resource_rows,
     build_v2_special_row,
     get_item_detail_mysql,
+    get_items_mysql,
+    mysql_reset_table_names,
+    mysql_table_names,
     parse_source_item_ref,
 )
+from jd_scraper_v2 import datetime_to_db
 
 
 class MySQLStoreV2MappingTests(unittest.TestCase):
@@ -150,6 +156,21 @@ class MySQLStoreV2MappingTests(unittest.TestCase):
         self.assertEqual(row["price_basis"], "start_price_fallback")
 
 
+    def test_ai_common_update_row_rejects_non_price_final_display(self):
+        db = MySQLJDScraperDatabase(MySQLConfig(database="unused"))
+
+        row = db._ai_common_update_row(
+            {"final_price_raw": "保证金（元）"},
+            {},
+            {},
+            "vehicle",
+            existing_item={"final_price_display": "2,600元/辆"},
+        )
+
+        self.assertNotIn("final_price_display", row)
+        self.assertNotIn("final_price_amount", row)
+
+
     def test_v2_resource_rows_split_attachments_and_media(self):
         rows = build_v2_resource_rows(
             item_id=12,
@@ -192,7 +213,50 @@ class MySQLStoreV2MappingTests(unittest.TestCase):
 
         self.assertIn("CREATE TABLE IF NOT EXISTS ai_enrichment_queue", schema)
         self.assertIn("context_json JSON", schema)
+        self.assertIn("pending/running/parsing/paused/success/failed/skipped", schema)
+        self.assertIn("running_profile_name VARCHAR(100)", schema)
+        self.assertIn("running_provider VARCHAR(80)", schema)
+        self.assertIn("running_model_name VARCHAR(200)", schema)
         self.assertIn("ai_enrichment_queue", V2_DROP_TABLES)
+
+    def test_v2_schema_includes_resume_and_dead_letter_tables(self):
+        schema = V2_SCHEMA_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS crawl_checkpoints", schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS crawl_queue_events", schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS dead_letter_queue", schema)
+        self.assertIn("crawl_checkpoints", V2_DROP_TABLES)
+        self.assertIn("crawl_queue_events", V2_DROP_TABLES)
+        self.assertIn("dead_letter_queue", V2_DROP_TABLES)
+
+    def test_formal_v2_schema_does_not_create_legacy_tables(self):
+        schema = V2_SCHEMA_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("CREATE TABLE IF NOT EXISTS auction_items_common", schema)
+        self.assertNotIn("CREATE TABLE IF NOT EXISTS field_comments", schema)
+        self.assertNotIn("CREATE TABLE IF NOT EXISTS crawl_queue_items", schema)
+        self.assertNotIn("auction_items_common", mysql_table_names())
+        self.assertNotIn("field_comments", mysql_table_names())
+        self.assertNotIn("crawl_queue_items", mysql_table_names())
+        self.assertIn("auction_items_common", mysql_reset_table_names())
+        self.assertIn("field_comments", mysql_reset_table_names())
+        self.assertIn("crawl_queue_items", mysql_reset_table_names())
+
+    def test_mysql_store_legacy_entrypoints_are_not_public(self):
+        import jd_mysql_store
+
+        self.assertFalse(hasattr(jd_mysql_store, "MYSQL_SCHEMA"))
+        self.assertFalse(hasattr(jd_mysql_store, "ensure_legacy_mysql_schema"))
+        self.assertFalse(hasattr(jd_mysql_store, "import_sqlite_to_mysql"))
+        self.assertFalse(hasattr(jd_mysql_store, "clean_invalid_assessment_rows"))
+        source = Path("jd_mysql_store.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count("def get_items_mysql("), 1)
+        self.assertEqual(source.count("def get_item_detail_mysql("), 1)
+
+    def test_web_admin_crawl_queue_router_does_not_reference_legacy_queue_table(self):
+        router_source = Path("web_admin/routers/queues.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("crawl_queue_items", router_source)
 
 
     def test_v2_special_rows_use_item_id_and_do_not_repeat_common_risk_fields(self):
@@ -256,6 +320,36 @@ class MySQLStoreV2MappingTests(unittest.TestCase):
         )
 
         self.assertNotIn("final_price_display", row_with_existing_final)
+
+    def test_debt_detail_money_uses_table_unit_when_cell_has_no_unit(self):
+        detail = {
+            "principal_balance": "117.05",
+            "interest_balance": "3.2",
+            "source_excerpt": "债权明细表，单位：万元",
+        }
+
+        self.assertEqual(_debt_detail_money_decimal(detail["principal_balance"], detail), Decimal("1170500.00"))
+        self.assertEqual(_debt_detail_money_decimal(detail["interest_balance"], detail), Decimal("32000.00"))
+
+    def test_debt_detail_money_does_not_double_multiply_explicit_unit(self):
+        detail = {
+            "principal_balance": "117.05万元",
+            "source_excerpt": "债权明细表，单位：万元",
+        }
+
+        self.assertEqual(_debt_detail_money_decimal(detail["principal_balance"], detail), Decimal("1170500.00"))
+
+    def test_debt_detail_money_does_not_double_multiply_real_unicode_unit(self):
+        detail = {
+            "principal_balance": "1000.000000万元",
+            "source_excerpt": "债权明细表，单位：万元",
+        }
+
+        self.assertEqual(_debt_detail_money_decimal(detail["principal_balance"], detail), Decimal("10000000.00"))
+
+    def test_datetime_to_db_preserves_iso_t_time(self):
+        self.assertEqual(datetime_to_db("2026-07-06T10:00:00"), "2026-07-06 10:00:00")
+        self.assertEqual(datetime_to_db("2026-07-06T10:00"), "2026-07-06 10:00:00")
 
     def test_mysql_detail_includes_structured_item_resources(self):
         class FakeCursor:
@@ -337,6 +431,76 @@ class MySQLStoreV2MappingTests(unittest.TestCase):
         self.assertEqual(len(detail["resources"]), 2)
         self.assertEqual(detail["resources"][0]["resource_type"], "attachment")
         self.assertEqual(detail["resources"][1]["resource_role"], "site_image")
+
+    def test_mysql_list_filters_by_source_platform(self):
+        class FakeCursor:
+            def __init__(self):
+                self.calls = []
+                self.result = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, sql, params=None):
+                self.calls.append((sql, tuple(params or ())))
+                if "FROM auction_items c" in sql:
+                    self.result = [
+                        {
+                            "paimai_id": "jd:310000001",
+                            "source_platform": "jd",
+                            "source_site_name": "京东拍卖",
+                            "source_item_id": "310000001",
+                            "asset_group": "real_estate",
+                            "asset_group_label": "房地产",
+                            "jd_category_id": "102",
+                            "jd_category_name": "商业用房",
+                            "project_name": "test",
+                            "asset_location": "loc",
+                            "project_status": "进行中",
+                            "start_price_raw": "1.00 元",
+                            "final_price_raw": "1.00 元",
+                            "disposal_party": "party",
+                            "total_fields": 1,
+                            "extracted_fields": 1,
+                            "issue_fields": 0,
+                        }
+                    ]
+                elif "GROUP BY asset_group" in sql:
+                    self.result = [{"asset_group": "real_estate", "asset_group_label": "房地产", "count": 1}]
+                elif "SELECT DISTINCT project_status" in sql:
+                    self.result = [{"project_status": "进行中"}]
+                elif "GROUP BY source_platform" in sql:
+                    self.result = [{"source_platform": "jd", "source_site_name": "京东拍卖", "count": 1}]
+                else:
+                    raise AssertionError(f"Unexpected SQL: {sql}")
+
+            def fetchall(self):
+                return self.result
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_obj = FakeCursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def cursor(self):
+                return self.cursor_obj
+
+        fake_conn = FakeConnection()
+        with patch("jd_mysql_store.mysql_connection", return_value=fake_conn):
+            data = get_items_mysql(MySQLConfig(), {"source_platform": "jd"})
+
+        main_sql, main_params = fake_conn.cursor_obj.calls[0]
+        self.assertIn("c.source_platform = %s", main_sql)
+        self.assertEqual(main_params, ("jd",))
+        self.assertEqual(data["source_platforms"][0]["source_platform"], "jd")
 
 
 if __name__ == "__main__":

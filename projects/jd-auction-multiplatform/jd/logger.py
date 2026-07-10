@@ -2,14 +2,13 @@
 结构化日志模块
 输出 JSON Lines 格式，同时保持控制台输出可读性
 """
-from __future__ import annotations
 
 import json
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Optional, TextIO
 
 from .config import LogConfig
 
@@ -17,9 +16,9 @@ from .config import LogConfig
 class StructuredLogger:
     """结构化日志记录器"""
 
-    def __init__(self, config: LogConfig | None = None) -> None:
+    def __init__(self, config: Optional[LogConfig] = None) -> None:
         self.config = config or LogConfig()
-        self._file_handle: TextIO | None = None
+        self._file_handle: Optional[TextIO] = None
         self._level_map = {
             "DEBUG": 10,
             "INFO": 20,
@@ -41,8 +40,8 @@ class StructuredLogger:
         level: str,
         event: str,
         message: str = "",
-        paimai_id: str | None = None,
-        duration_ms: float | None = None,
+        paimai_id: Optional[str] = None,
+        duration_ms: Optional[float] = None,
         **kwargs: Any,
     ) -> None:
         """记录结构化日志"""
@@ -152,7 +151,7 @@ class StructuredLogger:
             error=error,
         )
 
-    def log_extraction(self, field_key: str, status: str, source: str, paimai_id: str | None = None) -> None:
+    def log_extraction(self, field_key: str, status: str, source: str, paimai_id: Optional[str] = None) -> None:
         self.debug(
             "extraction",
             f"字段提取: {field_key} {status}",
@@ -162,7 +161,7 @@ class StructuredLogger:
             paimai_id=paimai_id,
         )
 
-    def log_db_upsert(self, table: str, paimai_id: str | None = None, duration_ms: float = 0) -> None:
+    def log_db_upsert(self, table: str, paimai_id: Optional[str] = None, duration_ms: float = 0) -> None:
         self.debug(
             "db_upsert",
             f"数据库写入: {table}",
@@ -171,7 +170,7 @@ class StructuredLogger:
             duration_ms=duration_ms,
         )
 
-    def log_error(self, error_type: str, message: str, paimai_id: str | None = None, **kwargs: Any) -> None:
+    def log_error(self, error_type: str, message: str, paimai_id: Optional[str] = None, **kwargs: Any) -> None:
         self.error(
             "error",
             message,
@@ -188,10 +187,10 @@ class StructuredLogger:
 
 
 # 全局日志单例
-_global_logger: StructuredLogger | None = None
+_global_logger: Optional[StructuredLogger] = None
 
 
-def get_logger(config: LogConfig | None = None) -> StructuredLogger:
+def get_logger(config: Optional[LogConfig] = None) -> StructuredLogger:
     """获取全局日志单例"""
     global _global_logger
     if config is not None:

@@ -222,7 +222,7 @@ class CquaeAdapterTests(unittest.TestCase):
         self.assertEqual(common["project_name"], "渝北区某房产转让")
         self.assertEqual(common["asset_location"], "重庆市渝北区")
         self.assertEqual(common["project_status"], "正式披露")
-        self.assertIsNone(common["start_price_raw"])
+        self.assertEqual(common["start_price_raw"], "120.00 万元")
         self.assertEqual(common["final_price_raw"], "120.00 万元")
         self.assertIn("张老师", common["contact_info"])
         self.assertIn("023-63600000", common["contact_info"])
@@ -259,6 +259,191 @@ class CquaeAdapterTests(unittest.TestCase):
             classify_asset_group("紫砂壶", "紫砂壶3把-92--一批紫砂壶（GM202602）", ""),
             "goods",
         )
+
+
+# ===== 新类型的 map_special_candidates 测试 =====
+
+    EQUITY_DETAIL_HTML = """
+    <html><body>
+      <h1>四川某公司股权转让</h1>
+      <table>
+        <tr><td>项目名称</td><td>四川某公司股权转让</td></tr>
+        <tr><td>转让方</td><td>四川能源发展集团</td></tr>
+        <tr><td>标的企业</td><td>目标科技有限公司</td></tr>
+        <tr><td>股权比例</td><td>70%</td></tr>
+        <tr><td>企业性质</td><td>有限责任公司</td></tr>
+        <tr><td>所属行业</td><td>科技推广和应用服务业</td></tr>
+        <tr><td>经营范围</td><td>技术开发、技术咨询</td></tr>
+        <tr><td>股权结构</td><td>四川能源发展集团有限责任公司 70%，中国建筑一局（集团）有限公司 20%，成都空港城市发展集团有限公司 10%</td></tr>
+        <tr><td>财务指标</td><td>营业收入1910.63万元，利润总额402.63万元</td></tr>
+        <tr><td>资产评估</td><td>资产总额33907.51万元，负债总额15610.40万元，净资产18297.11万元</td></tr>
+        <tr><td>重大事项</td><td>无重大未披露事项</td></tr>
+      </table>
+    </body></html>
+    """
+
+    IP_DETAIL_HTML = """
+    <html><body>
+      <h1>一种新型专利技术转让</h1>
+      <table>
+        <tr><td>项目名称</td><td>一种新型专利技术转让</td></tr>
+        <tr><td>标的名称</td><td>发明专利"新型材料制备方法"</td></tr>
+        <tr><td>标的证号</td><td>ZL202310000001.X</td></tr>
+        <tr><td>知产类型</td><td>发明专利</td></tr>
+        <tr><td>权利人</td><td>某科技大学</td></tr>
+        <tr><td>标的简介</td><td>本发明涉及新材料制备技术领域</td></tr>
+        <tr><td>有效期</td><td>20年</td></tr>
+      </table>
+    </body></html>
+    """
+
+    EQUIPMENT_DETAIL_HTML = """
+    <html><body>
+      <h1>闲置机器设备一批转让</h1>
+      <table>
+        <tr><td>项目名称</td><td>闲置机器设备一批转让</td></tr>
+        <tr><td>存放位置</td><td>重庆市江北区厂房内</td></tr>
+        <tr><td>设备状态</td><td>闲置</td></tr>
+        <tr><td>设备类型</td><td>数控机床</td></tr>
+        <tr><td>重要信息披露</td><td>设备已停用2年，需检修</td></tr>
+      </table>
+    </body></html>
+    """
+
+    GOODS_DETAIL_HTML = """
+    <html><body>
+      <h1>库存钢材一批转让</h1>
+      <table>
+        <tr><td>项目名称</td><td>库存钢材一批转让</td></tr>
+        <tr><td>物资种类</td><td>钢材</td></tr>
+        <tr><td>物资名称</td><td>螺纹钢</td></tr>
+        <tr><td>物资所在地</td><td>重庆市沙坪坝区仓库</td></tr>
+        <tr><td>数量</td><td>500吨</td></tr>
+        <tr><td>权利人</td><td>重庆钢铁集团</td></tr>
+      </table>
+    </body></html>
+    """
+
+    USUFRUCT_DETAIL_HTML = """
+    <html><body>
+      <h1>某商场经营权转让</h1>
+      <table>
+        <tr><td>项目名称</td><td>某商场经营权转让</td></tr>
+        <tr><td>权益类型</td><td>经营权</td></tr>
+        <tr><td>标的名称</td><td>江北区某商场20年经营权</td></tr>
+        <tr><td>标的所在位置</td><td>重庆市江北区观音桥</td></tr>
+        <tr><td>经营期限</td><td>20年</td></tr>
+        <tr><td>原权利人</td><td>重庆某商业管理公司</td></tr>
+      </table>
+    </body></html>
+    """
+
+    def test_map_special_equity_extracts_fields(self):
+        bundle = self.adapter.parse_detail_html(
+            self.EQUITY_DETAIL_HTML,
+            url="https://www.cquae.com/Project/Show?id=1340441",
+        )
+        special = self.adapter.map_special_candidates(bundle, "equity")
+
+        self.assertEqual(special["transferor"], "四川能源发展集团")
+        self.assertEqual(special["target_company"], "目标科技有限公司")
+        self.assertEqual(special["equity_ratio"], "70%")
+        self.assertEqual(special["company_nature"], "有限责任公司")
+        self.assertEqual(special["company_industry"], "科技推广和应用服务业")
+        self.assertEqual(special["business_scope"], "技术开发、技术咨询")
+        self.assertIn("70%", special["ownership_structure"])
+        self.assertIn("四川能源发展集团有限责任公司", special["ownership_structure"])
+        self.assertIn("1910.63万元", special["financial_metrics"])
+        self.assertIn("33907.51万元", special["asset_valuation"])
+        self.assertEqual(special["disclosure_items"], "无重大未披露事项")
+        # 不包含默认分支字段
+        self.assertNotIn("raw_detail_text", special)
+        self.assertNotIn("raw_table_pairs_json", special)
+
+    def test_map_special_ip_extracts_fields(self):
+        bundle = self.adapter.parse_detail_html(
+            self.IP_DETAIL_HTML,
+            url="https://www.cquae.com/Project/Show?id=ip001",
+        )
+        special = self.adapter.map_special_candidates(bundle, "ip")
+
+        self.assertEqual(special["subject_name"], "发明专利\"新型材料制备方法\"")
+        self.assertEqual(special["certificate_no"], "ZL202310000001.X")
+        self.assertEqual(special["ip_type"], "发明专利")
+        self.assertEqual(special["right_holder"], "某科技大学")
+        self.assertEqual(special["subject_intro"], "本发明涉及新材料制备技术领域")
+        self.assertEqual(special["right_term"], "20年")
+        self.assertNotIn("raw_detail_text", special)
+
+    def test_map_special_equipment_extracts_fields(self):
+        bundle = self.adapter.parse_detail_html(
+            self.EQUIPMENT_DETAIL_HTML,
+            url="https://www.cquae.com/Project/Show?id=eq001",
+        )
+        special = self.adapter.map_special_candidates(bundle, "equipment")
+
+        self.assertEqual(special["storage_location"], "重庆市江北区厂房内")
+        self.assertEqual(special["equipment_status"], "闲置")
+        self.assertEqual(special["equipment_type"], "数控机床")
+        self.assertEqual(special["disclosed_defects"], "设备已停用2年，需检修")
+        self.assertNotIn("raw_detail_text", special)
+
+    def test_map_special_goods_extracts_fields(self):
+        bundle = self.adapter.parse_detail_html(
+            self.GOODS_DETAIL_HTML,
+            url="https://www.cquae.com/Project/Show?id=gd001",
+        )
+        special = self.adapter.map_special_candidates(bundle, "goods")
+
+        self.assertEqual(special["goods_category"], "钢材")
+        self.assertEqual(special["goods_name"], "螺纹钢")
+        self.assertEqual(special["goods_location"], "重庆市沙坪坝区仓库")
+        self.assertEqual(special["goods_details"], "500吨")
+        self.assertEqual(special["right_holder"], "重庆钢铁集团")
+        self.assertNotIn("raw_detail_text", special)
+
+    def test_map_special_usufruct_extracts_fields(self):
+        bundle = self.adapter.parse_detail_html(
+            self.USUFRUCT_DETAIL_HTML,
+            url="https://www.cquae.com/Project/Show?id=us001",
+        )
+        special = self.adapter.map_special_candidates(bundle, "usufruct")
+
+        self.assertEqual(special["right_category"], "经营权")
+        self.assertEqual(special["subject_name"], "江北区某商场20年经营权")
+        self.assertEqual(special["subject_location"], "重庆市江北区观音桥")
+        self.assertEqual(special["valid_period"], "20年")
+        self.assertEqual(special["original_right_holder"], "重庆某商业管理公司")
+        self.assertNotIn("raw_detail_text", special)
+
+    def test_classify_asset_group_detects_ip(self):
+        """含知识产权关键词的标的应分类为 ip"""
+        self.assertEqual(
+            classify_asset_group("", "某公司专利权转让", ""),
+            "ip",
+        )
+        self.assertEqual(
+            classify_asset_group("", "某商标转让", ""),
+            "ip",
+        )
+        self.assertEqual(
+            classify_asset_group("", "软件著作权转让", ""),
+            "ip",
+        )
+
+    def test_map_special_other_falls_back_to_raw(self):
+        """未匹配的类型（other）仍返回默认 raw_detail_text"""
+        html = """
+        <html><body>
+          <table><tr><td>项目名称</td><td>其他项目</td></tr></table>
+        </body></html>
+        """
+        bundle = self.adapter.parse_detail_html(html, url="https://www.cquae.com/Project/Show?id=other001")
+        special = self.adapter.map_special_candidates(bundle, "other")
+
+        self.assertIn("raw_detail_text", special)
+        self.assertIn("raw_table_pairs_json", special)
+        self.assertNotIn("subject_name", special)
 
 
 if __name__ == "__main__":

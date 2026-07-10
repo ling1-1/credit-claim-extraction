@@ -1,4 +1,4 @@
-"""天津交易集团 / 天津产权交易中心 适配器
+﻿"""天津交易集团 / 天津产权交易中心 适配器
 
 基于 RESTful JSON API 的采集适配器。
 
@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
-from jd.ai_extractor import AIExtractionContext
+from jd.ai_extractor import AIExtractionContext, AI_DETAIL_TEXT_LIMIT
 
 
 # ===== 常量 =====
@@ -340,7 +340,7 @@ def parse_html_fragments(html_fragments: List[str]) -> _TpreHTMLParser:
     return parser
 
 
-FILE_LINK_RE = re.compile(r"\.(?:pdf|docx?|xlsx?|zip|rar|pptx?)($|[?#])", re.IGNORECASE)
+FILE_LINK_RE = re.compile(r"\.(?:(?:pdf|docx)?|xlsx?|(?:zip|rar)|pptx?)($|[?#])", re.IGNORECASE)
 
 
 def extract_attachments_from_links(links: List[Dict[str, str]], base_url: str) -> List[Dict[str, Any]]:
@@ -460,33 +460,46 @@ class TpreAdapter:
         self.session.headers.update(DEFAULT_HEADERS)
         self._detail_api_cache: Dict[str, str] = dict(TPRE_DETAIL_API_MAP)
 
-    # ── 列表 API ──
+    # ── 列表 API（支持多分类 + 正式披露过滤）──
+    TPRE_SYSTEM_CODES = {
+        "PROPERTY_RIGHT_TRANSFER": "产权转让",
+        "OFFICIAL_CAR": "二手车",
+        "FINANCE": "金融资产",
+        "SMALL_COMMODITY": "小宗资产",
+        "ENTERPRISE_ASSETS": "企业资产",
+    }
+
     def build_list_url(
         self,
         *,
         page: int = 1,
         size: int = 10,
-        keyword: str = "",
-        biz_type: str = "equity-trading",
+        system_code: str = "PROPERTY_RIGHT_TRANSFER",
+        biz_type_code: str = "FORMAL",
     ) -> str:
-        params = []
-        if keyword:
-            params.append(f"projectInformation={keyword}")
-        params.append(f"current={page}")
-        params.append(f"size={size}")
-        return f"{self.base_url}/up/biz/project/anmuas/{biz_type}/page?{'&'.join(params)}"
+        params = urlencode({
+            "bizTypeCode": biz_type_code,
+            "systemCode": system_code,
+            "current": page,
+            "size": size,
+        })
+        return f"{self.base_url}/up/biz/project/anmuas/page?{params}"
 
     def fetch_list_api(
         self,
+        *,
         page: int = 1,
         size: int = 10,
-        keyword: str = "",
-        biz_type: str = "equity-trading",
+        system_code: str = "PROPERTY_RIGHT_TRANSFER",
+        biz_type_code: str = "FORMAL",
     ) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"current": page, "size": size}
-        if keyword:
-            params["projectInformation"] = keyword
-        url = f"{self.base_url}/up/biz/project/anmuas/{biz_type}/page"
+        params: Dict[str, Any] = {
+            "bizTypeCode": biz_type_code,
+            "systemCode": system_code,
+            "current": page,
+            "size": size,
+        }
+        url = f"{self.base_url}/up/biz/project/anmuas/page"
         resp = self.session.get(url, params=params, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
@@ -651,8 +664,11 @@ class TpreAdapter:
                 "assessmentDate": "评估基准日",
                 "address": "地址",
                 "industryName": "所属行业",
-                "registeredCapital": "注册资本",
-                "businessScope": "经营范围",
+                "registCapi": "注册资本",
+                "scope": "经营范围",
+                "econKind": "企业性质",
+                "companyName": "企业名称",
+                "enterpriseName": "标的企业",
             }
             for json_key, label in json_key_mapping.items():
                 val = deep_find(detail_data, (json_key,))
@@ -696,6 +712,34 @@ class TpreAdapter:
                 transferor_info.get("transferorName"),
                 transferor_info.get("name"),
             )
+
+            # 从 propertyRightImportant 提取重大事项/特别告知
+            important = dict_from_deep_key(detail_data, "propertyRightImportant")
+            merge_kv(
+                "重大事项",
+                important.get("otherDisclosuresGather"),
+                important.get("otherDisclosures"),
+                important.get("majorDebt"),
+            )
+
+            # 从 propertyRightAssessment 提取评估信息
+            assessment = dict_from_deep_key(detail_data, "propertyRightAssessment")
+            merge_kv("评估机构", assessment.get("assessmentOrganization"))
+            merge_kv("评估基准日", assessment.get("assessmentDate"))
+            if assessment.get("thisAssessmentValue") is not None:
+                merge_kv(
+                    "评估价",
+                    f'{assessment["thisAssessmentValue"]} 万元',
+                )
+            if assessment.get("assessmentNetAssets") is not None:
+                merge_kv(
+                    "评估净资产",
+                    f'{assessment["assessmentNetAssets"]} 万元',
+                )
+
+            # 从 propertyRightDisclosureRules 提取交易方式
+            rules = dict_from_deep_key(detail_data, "propertyRightDisclosureRules")
+            merge_kv("交易方式", rules.get("transactionMode"))
 
         # 如果有 HTML 字段，解析提取更多键值对
         html_fields: List[str] = []
@@ -986,7 +1030,7 @@ class TpreAdapter:
             })
         else:
             values.update({
-                "raw_detail_text": (bundle.detail_text or "")[:12000],
+                "raw_detail_text": (bundle.detail_text or "")[:AI_DETAIL_TEXT_LIMIT],
                 "raw_table_pairs_json": json.dumps(kv, ensure_ascii=False, sort_keys=True),
                 "extracted_summary": first_non_blank(
                     kv.get("详细信息"), kv.get("重大事项"),

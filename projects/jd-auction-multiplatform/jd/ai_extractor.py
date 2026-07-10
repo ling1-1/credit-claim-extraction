@@ -2,13 +2,12 @@
 AI 辅助字段提取引擎
 支持 DeepSeek / Qwen / OpenAI 三种后端，提供规则失败时的兜底提取
 """
-from __future__ import annotations
 
 import json
 import time
 from dataclasses import dataclass, field
 import re
-from typing import Any
+from typing import Any, Optional
 
 from .ai_config import resolve_ai_config
 from .config import get_config
@@ -17,9 +16,13 @@ from .logger import get_logger
 logger = get_logger()
 
 AI_PROMPT_KEY_VALUES_LIMIT = 60000
-AI_PROMPT_DETAIL_TEXT_LIMIT = 30000
+AI_PROMPT_DETAIL_TEXT_LIMIT = 60000
 AI_PROMPT_NOTICE_TEXT_LIMIT = 30000
 AI_PROMPT_VISION_CONTEXT_LIMIT = 3000
+
+# 详情文本统一上限：bundle 原始文本、AI 上下文、入库 raw_detail_text 共用此值。
+# 模型（qwen-plus / gpt-4o-mini 等）上下文窗口约 128K，60000 中文字符≈2万 token，属适当范围。
+AI_DETAIL_TEXT_LIMIT = 60000
 
 
 @dataclass
@@ -33,7 +36,7 @@ class AIExtractionResult:
     reasoning: str = ""
     original_text: str = ""
     extraction_method: str = "ai"
-    error: str | None = None
+    error: Optional[str] = None
 
 
 @dataclass
@@ -47,7 +50,7 @@ class AIExtractionContext:
     paimai_id: str = ""
 
 
-def normalize_request_timeout(timeout: int | float | None) -> int | float | None:
+def normalize_request_timeout(timeout: Any) -> Any:
     """Return a requests-compatible timeout; 0/negative means no local timeout."""
     if timeout is None:
         return None
@@ -100,12 +103,26 @@ class OpenAIClient(BaseAIClient):
             "temperature": kwargs.get("temperature", 0.1),
             "response_format": {"type": "json_object"},
         }
+        # OpenAI 兼容端点: 如果 base_url 已包含 /chat/completions 则不拼接路径
+        if "/chat/completions" in self.base_url:
+            api_url = self.base_url
+        else:
+            api_url = f"{self.base_url}/v1/chat/completions"
         response = requests.post(
-            f"{self.base_url}/v1/chat/completions",
+            api_url,
             headers=headers,
             json=payload,
             timeout=self.timeout,
         )
+        # 部分模型不支持 response_format(json_object)，回退到普通请求
+        if response.status_code == 400 and "json_object" in response.text:
+            del payload["response_format"]
+            response = requests.post(
+                api_url,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
         response.raise_for_status()
         return response.json()
 
@@ -135,6 +152,14 @@ class DeepSeekClient(BaseAIClient):
             json=payload,
             timeout=self.timeout,
         )
+        if response.status_code == 400 and "json_object" in response.text:
+            del payload["response_format"]
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
         response.raise_for_status()
         return response.json()
 
@@ -164,6 +189,14 @@ class QwenClient(BaseAIClient):
             json=payload,
             timeout=self.timeout,
         )
+        if response.status_code == 400 and "json_object" in response.text:
+            del payload["response_format"]
+            response = requests.post(
+                f"{self.base_url}/compatible-mode/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
         response.raise_for_status()
         return response.json()
 
@@ -188,7 +221,7 @@ class AIFieldExtractor:
         self.provider = provider.lower()
         self.model_name = model_name
         self.vision_model = vision_model
-        self.client: BaseAIClient | None = None
+        self.client: Optional[BaseAIClient] = None
         self.timeout = normalize_request_timeout(timeout)
         self.max_retries = max_retries
         self.enable_single_field_fallback = enable_single_field_fallback
@@ -208,6 +241,9 @@ class AIFieldExtractor:
     ) -> None:
         """初始化 AI 客户端"""
         provider = provider.lower()
+        # bailian (百炼) 是千问的 OpenAI 兼容模式，使用 QwenClient
+        if provider == "bailian":
+            provider = "qwen"
         if provider == "openai":
             default_url = "https://api.openai.com"
             self.client = OpenAIClient(
@@ -248,7 +284,7 @@ class AIFieldExtractor:
         self.consecutive_failures = 0
         self.disabled_until = 0.0
 
-    def _record_failure(self, context: AIExtractionContext | None = None) -> None:
+    def _record_failure(self, context: Optional[AIExtractionContext] = None) -> None:
         if self.circuit_breaker_failures <= 0:
             return
         self.consecutive_failures += 1
@@ -371,7 +407,7 @@ class AIFieldExtractor:
             {"role": "user", "content": prompt},
         ]
 
-        last_error: Exception | None = None
+        last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
                 logger.debug(
@@ -576,7 +612,7 @@ class AIFieldExtractor:
             {"role": "user", "content": prompt},
         ]
 
-        last_error: Exception | None = None
+        last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
                 response = self.client.chat_completion(messages, **self._chat_kwargs(temperature=0.1))
@@ -683,12 +719,12 @@ class AIFieldExtractor:
             {"role": "user", "content": content},
         ]
 
-        last_error: Exception | None = None
+        last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
                 cfg = get_config()
                 vision_model = self.vision_model or getattr(cfg.ai, "vision_model", "") or (
-                    "qwen-vl-plus" if self.provider == "qwen" else "gpt-4o-mini"
+                    "qwen-vl-plus" if self.provider in ("qwen", "bailian") else "gpt-4o-mini"
                 )
                 response = self.client.chat_completion(messages, temperature=0.1, model=vision_model)
                 content_text = self.client.extract_json_from_response(response)
@@ -872,7 +908,7 @@ FIELD_DEFINITIONS: dict[str, dict[str, str]] = {
 }
 
 
-def create_ai_extractor(config: dict[str, Any] | None = None) -> AIFieldExtractor | None:
+def create_ai_extractor(config: dict[str, Any] | None = None) -> Optional[AIFieldExtractor]:
     """创建 AI 提取器实例"""
     cfg = get_config()
 

@@ -25,13 +25,17 @@ CREATE TABLE IF NOT EXISTS ai_model_profiles (
   timeout_seconds INT NULL COMMENT '单次请求超时秒数；0表示不设置本地超时',
   max_retries INT NULL COMMENT '失败重试次数',
   qps INT NULL COMMENT '调用限流QPS',
+  max_concurrency INT NULL COMMENT '该模型配置建议最大并发数；为空则由任务参数决定',
+  task_types JSON NULL COMMENT '适用任务类型数组，如 text/long_text/debt/vision/attachment；空表示通用',
+  priority INT NOT NULL DEFAULT 100 COMMENT '调度优先级，数字越小越优先',
   enabled TINYINT NOT NULL DEFAULT 1 COMMENT '是否启用',
   is_default TINYINT NOT NULL DEFAULT 0 COMMENT '是否默认配置',
   note VARCHAR(500) NULL COMMENT '备注',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   KEY idx_ai_profiles_enabled_default (enabled, is_default),
-  KEY idx_ai_profiles_provider (provider)
+  KEY idx_ai_profiles_provider (provider),
+  KEY idx_ai_profiles_routing (enabled, priority)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI模型配置表';
 
 CREATE TABLE IF NOT EXISTS crawl_jobs (
@@ -40,6 +44,7 @@ CREATE TABLE IF NOT EXISTS crawl_jobs (
   source_platform VARCHAR(50) NOT NULL COMMENT '来源平台: jd/ali/ejy365/cquae',
   cron_expr VARCHAR(100) NULL COMMENT 'cron表达式',
   category_scope JSON NULL COMMENT '类目、资产类型、筛选条件配置',
+  crawl_mode VARCHAR(20) NOT NULL DEFAULT 'incremental' COMMENT '采集模式: sample/full/incremental',
   page_limit INT NULL COMMENT '每次扫描页数',
   per_category_limit INT NULL COMMENT '每类最大采集数量',
   throttle_seconds DECIMAL(8,3) NULL COMMENT '请求间隔秒数',
@@ -60,6 +65,7 @@ CREATE TABLE IF NOT EXISTS crawl_job_runs (
   started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '开始时间',
   finished_at DATETIME NULL COMMENT '结束时间',
   status VARCHAR(30) NOT NULL DEFAULT 'running' COMMENT 'running/success/partial_success/failed/cancelled',
+  task_ref VARCHAR(120) NULL COMMENT '后台任务ID',
   scanned_count INT NOT NULL DEFAULT 0 COMMENT '扫描数量',
   queued_count INT NOT NULL DEFAULT 0 COMMENT '入队数量',
   success_count INT NOT NULL DEFAULT 0 COMMENT '成功数量',
@@ -153,7 +159,7 @@ CREATE TABLE IF NOT EXISTS crawl_queue (
   source_item_id VARCHAR(100) NOT NULL COMMENT '平台原始标的ID',
   source_url VARCHAR(1000) NOT NULL COMMENT '标的URL',
   item_id BIGINT NULL COMMENT '已入库标的ID',
-  queue_status VARCHAR(30) NOT NULL DEFAULT 'pending' COMMENT 'pending/running/success/failed/skipped',
+  queue_status VARCHAR(30) NOT NULL DEFAULT 'pending' COMMENT 'pending/running/pending_ai/success/failed/updated/unchanged/skipped',
   priority INT NOT NULL DEFAULT 100 COMMENT '优先级，数字越小越优先',
   retry_count INT NOT NULL DEFAULT 0 COMMENT '重试次数',
   max_retries INT NOT NULL DEFAULT 3 COMMENT '最大重试次数',
@@ -171,6 +177,53 @@ CREATE TABLE IF NOT EXISTS crawl_queue (
   CONSTRAINT fk_queue_item FOREIGN KEY (item_id) REFERENCES auction_items(item_id)
     ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='采集队列表';
+
+CREATE TABLE IF NOT EXISTS crawl_queue_events (
+  event_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '队列事件ID',
+  queue_id BIGINT NULL COMMENT '队列ID',
+  batch_id VARCHAR(64) NULL COMMENT '批次ID',
+  item_id BIGINT NULL COMMENT '标的ID',
+  source_platform VARCHAR(50) NOT NULL COMMENT '来源平台',
+  source_item_id VARCHAR(120) NULL COMMENT '平台原始标的ID',
+  from_status VARCHAR(30) NULL COMMENT '变更前状态',
+  to_status VARCHAR(30) NOT NULL COMMENT '变更后状态',
+  event_type VARCHAR(50) NOT NULL DEFAULT 'status_change' COMMENT '事件类型',
+  message TEXT NULL COMMENT '事件消息',
+  error_detail LONGTEXT NULL COMMENT '错误详情',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  KEY idx_crawl_queue_events_queue (queue_id),
+  KEY idx_crawl_queue_events_batch (batch_id),
+  KEY idx_crawl_queue_events_source (source_platform, source_item_id),
+  CONSTRAINT fk_queue_events_queue FOREIGN KEY (queue_id) REFERENCES crawl_queue(queue_id)
+    ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_queue_events_item FOREIGN KEY (item_id) REFERENCES auction_items(item_id)
+    ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='采集队列事件表';
+
+CREATE TABLE IF NOT EXISTS dead_letter_queue (
+  dead_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '死信ID',
+  queue_id BIGINT NULL COMMENT '队列ID',
+  task_type VARCHAR(50) NOT NULL DEFAULT 'crawl' COMMENT '任务类型 crawl/ai/ocr/attachment',
+  source_platform VARCHAR(50) NOT NULL COMMENT '来源平台',
+  source_item_id VARCHAR(120) NULL COMMENT '平台原始标的ID',
+  source_url VARCHAR(1000) NULL COMMENT '来源URL',
+  item_id BIGINT NULL COMMENT '标的ID',
+  batch_id VARCHAR(64) NULL COMMENT '批次ID',
+  failure_stage VARCHAR(80) NULL COMMENT '失败阶段',
+  retry_count INT NOT NULL DEFAULT 0 COMMENT '失败时重试次数',
+  error_message LONGTEXT NULL COMMENT '错误消息',
+  payload_json JSON NULL COMMENT '失败上下文',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  resolved_at DATETIME NULL COMMENT '处理时间',
+  resolved_status VARCHAR(30) NULL COMMENT '处理状态 ignored/requeued/fixed',
+  KEY idx_dead_letter_status (resolved_status),
+  KEY idx_dead_letter_source (source_platform, source_item_id),
+  KEY idx_dead_letter_batch (batch_id),
+  CONSTRAINT fk_dead_letter_queue FOREIGN KEY (queue_id) REFERENCES crawl_queue(queue_id)
+    ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_dead_letter_item FOREIGN KEY (item_id) REFERENCES auction_items(item_id)
+    ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='死信队列表';
 
 CREATE TABLE IF NOT EXISTS raw_payloads (
   payload_id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '原始数据ID',
@@ -278,12 +331,15 @@ CREATE TABLE IF NOT EXISTS ocr_retry_queue (
   source_item_id VARCHAR(100) NOT NULL COMMENT '平台原始标的ID',
   task_type VARCHAR(80) NOT NULL COMMENT '任务类型，如 ip_image_details',
   resource_urls_json JSON NOT NULL COMMENT '待识别图片URL列表',
-  queue_status VARCHAR(30) NOT NULL DEFAULT 'pending' COMMENT 'pending/running/success/failed/skipped',
+  queue_status VARCHAR(30) NOT NULL DEFAULT 'pending' COMMENT 'pending/running/parsing/paused/success/failed/skipped',
   priority INT NOT NULL DEFAULT 100 COMMENT '优先级，数字越小越优先',
   retry_count INT NOT NULL DEFAULT 0 COMMENT '重试次数',
   max_retries INT NOT NULL DEFAULT 3 COMMENT '最大重试次数',
   locked_by VARCHAR(100) NULL COMMENT 'Worker标识',
   locked_at DATETIME NULL COMMENT '锁定时间',
+  running_profile_name VARCHAR(100) NULL COMMENT '实际处理AI配置名',
+  running_provider VARCHAR(80) NULL COMMENT '实际处理AI供应商',
+  running_model_name VARCHAR(200) NULL COMMENT '实际处理AI模型',
   last_error TEXT NULL COMMENT '最后错误或入队原因',
   result_json JSON NULL COMMENT '识别结果JSON，成功后写入',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -304,12 +360,15 @@ CREATE TABLE IF NOT EXISTS ai_enrichment_queue (
   task_type VARCHAR(80) NOT NULL DEFAULT 'field_enrichment' COMMENT '任务类型，如 field_enrichment',
   context_json JSON NOT NULL COMMENT 'AI提取上下文，包含已抓取的公告、须知、详情、表格和图片URL',
   field_keys_json JSON NULL COMMENT '本次计划补提取字段列表，空表示按资产类型全量补提取',
-  queue_status VARCHAR(30) NOT NULL DEFAULT 'pending' COMMENT 'pending/running/success/failed/skipped',
+  queue_status VARCHAR(30) NOT NULL DEFAULT 'pending' COMMENT 'pending/running/parsing/paused/success/failed/skipped',
   priority INT NOT NULL DEFAULT 100 COMMENT '优先级，数字越小越优先',
   retry_count INT NOT NULL DEFAULT 0 COMMENT '重试次数',
   max_retries INT NOT NULL DEFAULT 3 COMMENT '最大重试次数',
   locked_by VARCHAR(100) NULL COMMENT 'Worker标识',
   locked_at DATETIME NULL COMMENT '锁定时间',
+  running_profile_name VARCHAR(100) NULL COMMENT '实际处理AI配置名',
+  running_provider VARCHAR(80) NULL COMMENT '实际处理AI供应商',
+  running_model_name VARCHAR(200) NULL COMMENT '实际处理AI模型',
   last_error TEXT NULL COMMENT '最后错误或入队原因',
   result_json JSON NULL COMMENT 'AI补提取结果JSON，成功后写入',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -589,3 +648,24 @@ CREATE TABLE IF NOT EXISTS data_quality_reports (
   CONSTRAINT fk_quality_batch FOREIGN KEY (batch_id) REFERENCES crawl_batches(batch_id)
     ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='批次数据质量报告表';
+
+CREATE TABLE IF NOT EXISTS crawl_list_fingerprints (
+  source_platform VARCHAR(50) NOT NULL COMMENT '来源平台',
+  source_item_id VARCHAR(128) NOT NULL COMMENT '平台原始标的ID',
+  fingerprint VARCHAR(512) NOT NULL COMMENT '列表级指纹(编号/标题/价格/日期/状态等摘要)',
+  updated_at DATETIME NOT NULL COMMENT '指纹更新时间',
+  PRIMARY KEY (source_platform, source_item_id),
+  KEY idx_fp_platform (source_platform)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='列表指纹表(支撑增量采集: 仅采集新增/变更标的)';
+
+CREATE TABLE IF NOT EXISTS crawl_checkpoints (
+  checkpoint_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  source_platform VARCHAR(50) NOT NULL COMMENT '平台',
+  category_key VARCHAR(80) NOT NULL DEFAULT 'default' COMMENT '分类标识',
+  current_page INT NOT NULL DEFAULT 1 COMMENT '当前页码',
+  total_items_seen INT NOT NULL DEFAULT 0 COMMENT '已处理标的数',
+  last_item_id VARCHAR(200) NULL COMMENT '最后处理的标的ID',
+  started_at DATETIME NULL COMMENT '首次开始时间',
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  UNIQUE KEY uk_platform_category (source_platform, category_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='采集断点表(支撑断点续传)';

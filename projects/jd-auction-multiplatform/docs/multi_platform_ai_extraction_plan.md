@@ -22,7 +22,7 @@
 ## 2. 总体原则
 
 1. **MySQL 是正式存储层**  
-   后续采集结果直接写入本地 MySQL 数据库 `auction_data`。SQLite 只保留为历史兼容或临时调试，不作为正式数据源。
+   Runtime storage is MySQL V2 only (`auction_data`); SQLite compatibility paths have been removed.
 
 2. **字段结构优先复用现有 V2 表结构**  
    新平台优先写入 `auction_items`、各资产类型特有表、`field_extractions`、`raw_payloads`、`item_resources` 等现有表。只有现有字段无法表达时，才新增字段或表。
@@ -539,3 +539,185 @@ Viewer 必须直接读 MySQL。
 7. 多标的公告不能串行提取其他标的字段。
 8. Viewer 能按平台和原始标的 ID 打开数据。
 9. 遇到风控、登录、验证码时要记录失败原因，不静默失败。
+
+## 16. 跨平台 Asset Group 映射
+
+所有平台的标的类型统一映射为以下 10 种 `asset_group`，对应数据库表：
+
+| asset_group | 中文 | 数据库表 |
+|------------|------|---------|
+| `land` | 土地 | `asset_land` |
+| `real_estate` | 房地产 | `asset_real_estate` |
+| `equipment` | 设备 | `asset_equipment` |
+| `vehicle` | 车辆 | `asset_vehicle` |
+| `debt` | 债权 | `asset_debt` |
+| `equity` | 股权 | `asset_equity` |
+| `ip` | 知识产权 | `asset_ip` |
+| `goods` | 物资产品 | `asset_goods` |
+| `usufruct` | 用益物权 | `asset_usufruct` |
+| `other` | 其他 | `asset_other` |
+
+### 16.1 京东 (jd)
+
+`CATEGORY_GROUPS` 直接映射类目ID到 asset_group，共 34 个类目：
+
+| 类目ID | 类目名 | asset_group |
+|--------|--------|------------|
+| 101 | 住宅用房 | `real_estate` |
+| 102 | 商业用房 | `real_estate` |
+| 103 | 工业用房 | `real_estate` |
+| 104 | 其他用房 | `real_estate` |
+| 105 | 机动车 | `vehicle` |
+| 106 | 船舶 | `vehicle` |
+| 107 | 其他交通运输工具 | `vehicle` |
+| 108 | 股权 | `equity` |
+| 109 | 债权 | `debt` |
+| 110 | 矿权 | `usufruct` |
+| 111 | 林权 | `usufruct` |
+| 112 | 土地 | `land` |
+| 113 | 工程 | `other` |
+| 114 | 机械设备 | `equipment` |
+| 115 | 无形资产 | `other` |
+| 116 | 知识产权 | `ip` |
+| 117 | 租赁/经营权 | `usufruct` |
+| 118 | 奢侈品 | `goods` |
+| 119 | 生活物资 | `goods` |
+| 120 | 工业物资 | `goods` |
+| 121 | 库存物资 | `goods` |
+| 122 | 打包处置 | `goods` |
+| 123 | 其他财产 | `other` |
+| 124-134 | 大宗农产品/废旧/黄金/酒水/珠宝/生鲜/电子产品/矿产资源等 | `goods` / `other` |
+
+### 16.2 E交易 (ejy365)
+
+`EJY365_PROJECT_TYPE_LABELS` 映射 36 种类型代码到 asset_group：
+
+| 类型代码 | 中文 | asset_group |
+|---------|------|------------|
+| ZQ | 债权 | `debt` |
+| FC | 房地产 | `real_estate` |
+| FCZZ | 房产租赁 | `real_estate` |
+| TD | 土地 | `land` |
+| CL | 车辆 | `vehicle` |
+| CZ | 船舶 | `vehicle` |
+| GQ | 股权 | `equity` |
+| ZSCQ | 知识产权 | `ip` |
+| SB | 设备 | `equipment` |
+| WZ | 物资产品 | `goods` |
+| KCPZR | 矿产品转让 | `goods` |
+| ZYSYQ | 用益物权 | `usufruct` |
+| KQ | 矿权 | `usufruct` |
+| LQ | 林权 | `usufruct` |
+| HKQ | 海域使用权 | `usufruct` |
+| GGJYQ | 广告经营权 | `usufruct` |
+| PFQJY | 排放权交易 | `usufruct` |
+| STZY | 生态资源 | `usufruct` |
+| GYYSQ | 国有土地使用权 | `usufruct` |
+| TDFWQ | 土地服务权 | `usufruct` |
+| QTKQ | 其他矿权 | `usufruct` |
+| TZQ | 投资权 | `usufruct` |
+| JYQ | 经营权 | `usufruct` |
+| CSSYQ | 场所使用权 | `usufruct` |
+| ZRZY | 自然资源 | `usufruct` |
+| PWS | 排污权 | `usufruct` |
+| PWFQ | 排放权 | `usufruct` |
+| HJSYQ | 环境使用权 | `usufruct` |
+| ZJGC | 在建工程 | `other` |
+| MTQCNZB | 煤炭去产能指标 | `other` |
+| QYTPH | 区域碳普惠 | `other` |
+| SJCPL | 数据产品类 | `other` |
+| SLL | 算力类 | `other` |
+| JN | 节能 | `other` |
+| SJ | 数据资产 | `other` |
+| QT | 其他 | `other` |
+
+### 16.3 阿里拍卖 (ali)
+
+`ALI_LIST_CHANNELS` 按频道（fcatV4Ids）映射到 asset_group：
+
+| 频道（key） | 中文 | asset_group |
+|------------|------|------------|
+| zspl_zz | 住宅用房 | `real_estate` |
+| zspl_sy | 商业用房 | `real_estate` |
+| zspl_gy | 工业用房 | `real_estate` |
+| zspl_qt | 其他用房 | `real_estate` |
+| cl | 机动车 | `vehicle` |
+| cb | 船舶 | `vehicle` |
+| qtjtgj | 其他交通工具 | `vehicle` |
+| gq | 股权 | `equity` |
+| zq | 债权 | `debt` |
+| td | 土地 | `land` |
+| kq | 矿权 | `usufruct` |
+| lq | 林权 | `usufruct` |
+| hy | 海域 | `usufruct` |
+| jxsb | 机械设备 | `equipment` |
+| txsb | 通信设备 | `equipment` |
+| wjj | 挖掘机/叉车 | `equipment` |
+| wxzc | 无形资产 | `other` |
+| zjgc | 在建工程 | `other` |
+| ylbjl | 原材料/边角料 | `goods` |
+| scp | 奢侈品 | `goods` |
+| zbss | 珠宝首饰 | `goods` |
+| wwsc | 文玩收藏 | `goods` |
+| sj | 手机 | `goods` |
+| dn | 电脑 | `goods` |
+| qtsm | 其他数码 | `goods` |
+| jj | 家具 | `goods` |
+| dq | 电器 | `goods` |
+| bjj | 白酒 | `goods` |
+| ali_qt | 其他 | `other` |
+
+### 16.4 广西产权 (gxcq)
+
+`ASSETS_TYPE_PARENT_MAP` + 标题关键词推断：
+
+| 类型代码 | 中文 | asset_group |
+|---------|------|------------|
+| ZQ | 债权 | `debt` |
+| GQ | 股权 | `equity` |
+| FC | 房产 | `real_estate` |
+| TD | 土地 | `land` |
+| CL | 车辆 | `vehicle` |
+| SB | 设备 | `equipment` |
+| WZ | 物资 | `goods` |
+| — | 标题含"知识产权/专利" | `ip` |
+| — | 标题含"租赁/经营权/使用权" | `usufruct` |
+| — | 其他 | `other` |
+
+### 16.5 重庆产权 (cquae) / 山东产权 (sdcqjy)
+
+`classify_asset_group` 根据标题关键词推断，优先级从上到下：
+
+| 关键词匹配规则 | asset_group |
+|---------------|------------|
+| 债权 | `debt` |
+| 车辆/机动车/汽车 | `vehicle` |
+| 房产/房地产/房屋/商铺/车位 | `real_estate` |
+| 土地/宗地 | `land` |
+| 设备/机器/机械 | `equipment` |
+| 物资/存货/货物/实物资产/紫砂/茶具/瓷器/工艺品/艺术品/收藏品/酒 | `goods` |
+| 知识产权/专利/商标/著作权/软件著作权 | `ip` |
+| 租赁/经营权/使用权 | `usufruct` |
+| 股权/企业增资/产权转让 | `equity` |
+| 其他 | `other` |
+
+### 16.6 天津产权 (tpre)
+
+`TPRE_SYSTEM_CODES` 定义业务分类，asset_group 通过详情页字段推断：
+
+| systemCode | 中文 | 说明 |
+|-----------|------|------|
+| PROPERTY_RIGHT_TRANSFER | 产权转让 | 详情页推断 asset_group |
+| OFFICIAL_CAR | 二手车 | 通常为 `vehicle` |
+| FINANCE | 金融资产 | 通常为 `other` 或 `debt` |
+| SMALL_COMMODITY | 小宗资产 | 通常为 `goods` |
+| ENTERPRISE_ASSETS | 企业资产 | 详情页推断 asset_group |
+
+### 16.7 北京产权 (cbex)
+
+通过详情页字段关键词推断 asset_group，规则同重庆产权 `classify_asset_group`。
+
+### 16.8 贵州阳光 (gycq)
+
+复用广西产权 `GxcqAdapter` 的 `infer_asset_group`，映射规则同 gxcq。
+

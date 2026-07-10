@@ -2,11 +2,10 @@
 多来源冲突检测器
 比较 API / HTML规则 / AI 三个来源的结果，检测并记录冲突
 """
-from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from .field_standardizer import FieldStandardizer
 from .logger import get_logger
@@ -43,7 +42,7 @@ class FieldValue:
     source: SourceType
     value: Any
     confidence: float = 0.0
-    raw_context: str | None = None
+    raw_context: Optional[str] = None
 
 
 @dataclass
@@ -198,7 +197,7 @@ class ConflictDetector:
         api_value: Any = None,
         html_value: Any = None,
         ai_value: Any = None,
-        field_type: str | None = None,
+        field_type: Optional[str] = None,
     ) -> ConflictDetail:
         """检测单个字段的多来源冲突"""
         values: list[FieldValue] = []
@@ -252,7 +251,7 @@ class ConflictDetector:
             needs_review=needs_review,
         )
 
-    def _get_comparator(self, field_type: str | None, field_key: str) -> Callable:
+    def _get_comparator(self, field_type: Optional[str], field_key: str) -> Callable:
         """根据字段类型获取比较器"""
         field_lower = field_key.lower() if field_key else ""
 

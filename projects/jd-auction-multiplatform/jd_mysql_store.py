@@ -1,15 +1,13 @@
-from __future__ import annotations
-
+﻿
 import argparse
 import datetime as dt
 import hashlib
 import json
 import re
-import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Optional
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -47,8 +45,8 @@ from jd_scraper_v2 import (
 class MySQLConfig:
     host: str = "127.0.0.1"
     port: int = 3306
-    user: str = ""
-    password: str = ""
+    user: str = "root"
+    password: str = "root"
     database: str = "auction_data"
 
 
@@ -79,483 +77,26 @@ def ensure_mysql_database(config: MySQLConfig) -> None:
         conn.commit()
 
 
-MYSQL_SCHEMA = [
-    """
-    CREATE TABLE IF NOT EXISTS crawl_batches (
-      batch_id VARCHAR(64) PRIMARY KEY COMMENT '采集批次唯一标识',
-      started_at DATETIME NULL COMMENT '批次开始时间',
-      finished_at DATETIME NULL COMMENT '批次完成时间',
-      parameters_json LONGTEXT NULL COMMENT '采集参数 JSON',
-      status VARCHAR(30) NULL COMMENT '批次状态',
-      message TEXT NULL COMMENT '批次消息',
-      summary_json LONGTEXT NULL COMMENT '批次统计、错误和参数汇总 JSON'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='采集批次管理表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS raw_payloads (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '京东拍卖标的 ID',
-      batch_id VARCHAR(64) NULL COMMENT '采集批次 ID',
-      source_url VARCHAR(500) NULL COMMENT '标的页面 URL',
-      list_json LONGTEXT NULL COMMENT '列表接口原始 JSON',
-      detail_json LONGTEXT NULL COMMENT '详情接口原始 JSON',
-      product_basic_json LONGTEXT NULL COMMENT '商品基础信息接口原始 JSON',
-      realtime_json LONGTEXT NULL COMMENT '实时价格接口原始 JSON',
-      description_html LONGTEXT NULL COMMENT '标的物详情 HTML 原文',
-      notice_html LONGTEXT NULL COMMENT '竞买须知 HTML 原文',
-      announcement_html LONGTEXT NULL COMMENT '竞买公告 HTML 原文',
-      attachments_json LONGTEXT NULL COMMENT '附件和图片视频 JSON',
-      attachment_texts LONGTEXT NULL COMMENT '附件解析文本 JSON',
-      vendor_json LONGTEXT NULL COMMENT '处置方接口原始 JSON',
-      crawled_at DATETIME NULL COMMENT '采集时间',
-      KEY idx_raw_batch (batch_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='原始数据存档表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS field_catalog (
-      field_namespace VARCHAR(64) NOT NULL COMMENT '字段命名空间',
-      asset_group VARCHAR(32) NULL COMMENT '资产类型代码',
-      field_key VARCHAR(80) NOT NULL COMMENT '字段英文键',
-      field_label VARCHAR(120) NULL COMMENT '字段中文名',
-      field_scope VARCHAR(30) NULL COMMENT '字段范围',
-      data_type VARCHAR(50) NULL COMMENT '建议数据库类型',
-      required_for_display TINYINT NULL COMMENT '是否必须展示',
-      aliases_json LONGTEXT NULL COMMENT '同义字段 JSON',
-      source_priority_json LONGTEXT NULL COMMENT '来源优先级 JSON',
-      export_order INT NULL COMMENT '展示顺序',
-      PRIMARY KEY (field_namespace, field_key)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='字段元数据表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS field_extractions (
-      paimai_id VARCHAR(32) NOT NULL COMMENT '标的 ID',
-      field_namespace VARCHAR(64) NOT NULL COMMENT '字段命名空间',
-      asset_group VARCHAR(32) NULL COMMENT '资产类型',
-      field_key VARCHAR(80) NOT NULL COMMENT '字段英文键',
-      field_label VARCHAR(120) NULL COMMENT '字段中文名',
-      raw_value LONGTEXT NULL COMMENT '原始提取值',
-      normalized_value LONGTEXT NULL COMMENT '用于展示/导出的标准化值',
-      value_type VARCHAR(30) NULL COMMENT '值类型：text/money/date/datetime',
-      numeric_value DECIMAL(18,2) NULL COMMENT '数值或金额类字段的标准化数值',
-      date_value DATE NULL COMMENT '日期类字段的标准化日期',
-      datetime_value DATETIME NULL COMMENT '时间类字段的标准化时间',
-      status VARCHAR(30) NULL COMMENT 'extracted/missing_on_page/conflict 等',
-      method VARCHAR(50) NULL COMMENT 'api/html_text_regex/ai 等提取方法',
-      confidence DECIMAL(5,4) NULL COMMENT '置信度',
-      source_payload_type VARCHAR(50) NULL COMMENT '来源数据类型',
-      source_path VARCHAR(300) NULL COMMENT '来源路径',
-      source_excerpt LONGTEXT NULL COMMENT '来源原文片段',
-      missing_reason VARCHAR(500) NULL COMMENT '缺失原因',
-      extracted_at DATETIME NULL COMMENT '提取时间',
-      PRIMARY KEY (paimai_id, field_namespace, field_key),
-      KEY idx_fx_field (field_namespace, field_key),
-      KEY idx_fx_status (status)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='字段提取证据表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS auction_items_common (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '京东拍卖标的 ID',
-      batch_id VARCHAR(64) NULL COMMENT '采集批次 ID',
-      source_url VARCHAR(500) NULL COMMENT '标的页面 URL',
-      source_platform VARCHAR(50) NOT NULL DEFAULT 'jd' COMMENT '来源平台',
-      source_item_id VARCHAR(80) NULL COMMENT '来源平台标的 ID',
-      asset_group VARCHAR(32) NOT NULL COMMENT '内部资产类型代码',
-      asset_group_label VARCHAR(50) NULL COMMENT '资产类型中文名',
-      jd_category_id VARCHAR(30) NULL COMMENT '京东类目 ID',
-      jd_category_name VARCHAR(100) NULL COMMENT '京东类目名称',
-      asset_type VARCHAR(80) NULL COMMENT '标的类型',
-      asset_location VARCHAR(500) NULL COMMENT '标的所在地',
-      project_status VARCHAR(50) NULL COMMENT '项目状态',
-      auction_stage VARCHAR(50) NULL COMMENT '拍卖阶段',
-      bid_records_json LONGTEXT NULL COMMENT '出价记录 JSON',
-      data_source VARCHAR(100) NULL COMMENT '数据来源',
-      project_name VARCHAR(500) NULL COMMENT '项目名称',
-      signup_start_time DATETIME NULL COMMENT '报名/竞价开始时间',
-      signup_end_time DATETIME NULL COMMENT '报名/竞价截止时间',
-      disposal_party VARCHAR(500) NULL COMMENT '处置方',
-      disposal_agency VARCHAR(500) NULL COMMENT '处置机构/上传机构',
-      start_price_raw VARCHAR(100) NULL COMMENT '起拍价原始展示值',
-      start_price_display VARCHAR(100) NULL COMMENT '起拍价展示值',
-      final_price_raw VARCHAR(100) NULL COMMENT '最终价/当前价原始展示值',
-      current_price_display VARCHAR(100) NULL COMMENT '当前价展示值',
-      current_price_amount DECIMAL(18,2) NULL COMMENT '当前价标准化金额，单位元',
-      final_price_display VARCHAR(100) NULL COMMENT '最终价/当前价展示值',
-      contact_info VARCHAR(1000) NULL COMMENT '联系方式',
-      special_notice LONGTEXT NULL COMMENT '特别告知/重大提示',
-      assessment_price_time VARCHAR(500) NULL COMMENT '评估价格及时间原始展示值',
-      attachments_json LONGTEXT NULL COMMENT '附件和图片视频 JSON',
-      common_fields_json LONGTEXT NULL COMMENT '共有字段完整快照 JSON',
-      signup_start_time_norm DATETIME NULL COMMENT '开始时间标准化值',
-      signup_end_time_norm DATETIME NULL COMMENT '截止时间标准化值',
-      start_price_amount DECIMAL(18,2) NULL COMMENT '起拍价标准化金额，单位元',
-      final_price_amount DECIMAL(18,2) NULL COMMENT '最终价/当前价标准化金额，单位元',
-      assessment_price_amount DECIMAL(18,2) NULL COMMENT '评估价标准化金额，单位元',
-      assessment_amount DECIMAL(18,2) NULL COMMENT '评估价标准化金额，单位元',
-      assessment_date DATE NULL COMMENT '评估基准日/评估日期',
-      dedup_hash VARCHAR(64) NULL COMMENT '跨平台去重指纹',
-      updated_at DATETIME NULL COMMENT '更新时间',
-      UNIQUE KEY uk_source_item (source_platform, source_item_id),
-      KEY idx_common_group (asset_group),
-      KEY idx_common_status (project_status),
-      KEY idx_common_dedup (dedup_hash)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='共有字段主表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_land (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      right_certificate_no VARCHAR(200) NULL COMMENT '权证编号',
-      land_area VARCHAR(200) NULL COMMENT '土地面积原始值',
-      land_area_sqm DECIMAL(18,2) NULL COMMENT '土地面积标准化值，单位平方米',
-      land_use VARCHAR(300) NULL COMMENT '土地用途',
-      use_term VARCHAR(300) NULL COMMENT '使用期限',
-      land_location VARCHAR(500) NULL COMMENT '土地位置',
-      right_holder VARCHAR(500) NULL COMMENT '权利人',
-      land_status VARCHAR(300) NULL COMMENT '土地状态',
-      disclosed_defects LONGTEXT NULL COMMENT '公示瑕疵',
-      site_images LONGTEXT NULL COMMENT '现场图片 JSON',
-      land_type VARCHAR(200) NULL COMMENT '土地类型',
-      assessment_time_value VARCHAR(500) NULL COMMENT '评估时间及价值原始值',
-      assessment_amount DECIMAL(18,2) NULL COMMENT '评估价标准化金额，单位元',
-      assessment_date DATE NULL COMMENT '评估日期',
-      special_fields_json LONGTEXT NULL COMMENT '土地特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='土地特有字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_real_estate (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      right_certificate_no VARCHAR(200) NULL COMMENT '权证编号',
-      building_area VARCHAR(200) NULL COMMENT '建筑面积原始值',
-      building_area_sqm DECIMAL(18,2) NULL COMMENT '建筑面积标准化值，单位平方米',
-      property_use VARCHAR(300) NULL COMMENT '房产用途',
-      use_term VARCHAR(300) NULL COMMENT '使用年限/期限',
-      property_location VARCHAR(500) NULL COMMENT '房产位置',
-      property_structure VARCHAR(300) NULL COMMENT '房产结构',
-      property_status VARCHAR(300) NULL COMMENT '房产状态',
-      disclosed_defects LONGTEXT NULL COMMENT '公示瑕疵',
-      site_images LONGTEXT NULL COMMENT '现场图片 JSON',
-      property_type VARCHAR(200) NULL COMMENT '房产类型',
-      asset_highlights LONGTEXT NULL COMMENT '资产亮点',
-      special_fields_json LONGTEXT NULL COMMENT '房地产特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='房地产特有字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_equipment (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      storage_location VARCHAR(500) NULL COMMENT '存放位置',
-      equipment_status VARCHAR(300) NULL COMMENT '设备状态',
-      disclosed_defects LONGTEXT NULL COMMENT '公示瑕疵',
-      site_images LONGTEXT NULL COMMENT '现场图片 JSON',
-      equipment_type VARCHAR(200) NULL COMMENT '设备类型',
-      special_fields_json LONGTEXT NULL COMMENT '设备特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='设备特有字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_vehicle (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      storage_location VARCHAR(500) NULL COMMENT '存放位置',
-      vehicle_brand_model VARCHAR(500) NULL COMMENT '车型品牌',
-      vehicle_usage VARCHAR(1000) NULL COMMENT '车辆使用情况',
-      plate_number VARCHAR(100) NULL COMMENT '车牌号',
-      vehicle_configuration VARCHAR(500) NULL COMMENT '车辆配置',
-      vehicle_status VARCHAR(500) NULL COMMENT '车辆状态',
-      disclosed_defects LONGTEXT NULL COMMENT '公示瑕疵',
-      vehicle_images LONGTEXT NULL COMMENT '车辆图片 JSON',
-      vehicle_type VARCHAR(200) NULL COMMENT '车辆类型',
-      special_fields_json LONGTEXT NULL COMMENT '车辆特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='车辆特有字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_debt (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      debtor_name VARCHAR(500) NULL COMMENT '主债务人名称汇总',
-      creditor VARCHAR(500) NULL COMMENT '债权人',
-      guarantee_method VARCHAR(300) NULL COMMENT '担保方式',
-      disclosed_defects LONGTEXT NULL COMMENT '公示瑕疵',
-      litigation_status LONGTEXT NULL COMMENT '诉讼状态',
-      household_count INT NULL COMMENT '户数',
-      benchmark_date VARCHAR(100) NULL COMMENT '基准日原始值',
-      benchmark_date_norm DATE NULL COMMENT '基准日标准化值',
-      special_fields_json LONGTEXT NULL COMMENT '债权特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='债权汇总字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_debt_details (
-      paimai_id VARCHAR(32) NOT NULL COMMENT '标的 ID',
-      detail_index INT NOT NULL COMMENT '明细序号',
-      sequence_no VARCHAR(50) NULL COMMENT '原表序号',
-      debtor_name VARCHAR(500) NULL COMMENT '该户债务人',
-      principal_balance VARCHAR(200) NULL COMMENT '本金余额原始值',
-      interest_balance VARCHAR(200) NULL COMMENT '利息余额原始值',
-      recovery_fee VARCHAR(200) NULL COMMENT '代垫费用原始值',
-      claim_total VARCHAR(200) NULL COMMENT '债权合计原始值',
-      principal_balance_amount DECIMAL(18,2) NULL COMMENT '本金余额标准化金额，单位元',
-      interest_balance_amount DECIMAL(18,2) NULL COMMENT '利息余额标准化金额，单位元',
-      recovery_fee_amount DECIMAL(18,2) NULL COMMENT '代垫费用标准化金额，单位元',
-      claim_total_amount DECIMAL(18,2) NULL COMMENT '债权合计标准化金额，单位元',
-      collateral LONGTEXT NULL COMMENT '抵质押物',
-      guarantor LONGTEXT NULL COMMENT '保证人',
-      litigation_status VARCHAR(500) NULL COMMENT '诉讼/执行状态',
-      benchmark_date VARCHAR(100) NULL COMMENT '基准日原始值',
-      benchmark_date_norm DATE NULL COMMENT '基准日标准化值',
-      amount_unit VARCHAR(50) NULL COMMENT '金额单位',
-      source_excerpt LONGTEXT NULL COMMENT '来源原文片段',
-      updated_at DATETIME NULL COMMENT '更新时间',
-      PRIMARY KEY (paimai_id, detail_index),
-      KEY idx_debt_detail_debtor (debtor_name)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='债权逐户明细表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_equity (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      transferor VARCHAR(500) NULL COMMENT '转让方',
-      target_company VARCHAR(500) NULL COMMENT '标的企业',
-      equity_ratio VARCHAR(100) NULL COMMENT '股权占比',
-      company_nature VARCHAR(200) NULL COMMENT '企业性质',
-      company_industry VARCHAR(300) NULL COMMENT '企业行业',
-      business_scope LONGTEXT NULL COMMENT '经营范围',
-      ownership_structure LONGTEXT NULL COMMENT '股权结构',
-      financial_metrics LONGTEXT NULL COMMENT '财务指标',
-      asset_valuation LONGTEXT NULL COMMENT '资产评估',
-      disclosure_items LONGTEXT NULL COMMENT '公示事项',
-      attached_assets LONGTEXT NULL COMMENT '附带标的',
-      special_fields_json LONGTEXT NULL COMMENT '股权特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='股权特有字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_ip (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      subject_name VARCHAR(500) NULL COMMENT '标的名称',
-      ip_count INT NULL COMMENT '知识产权数量',
-      specific_category VARCHAR(300) NULL COMMENT '具体类别',
-      right_holder VARCHAR(500) NULL COMMENT '权利人',
-      subject_intro LONGTEXT NULL COMMENT '标的简介',
-      disclosed_defects LONGTEXT NULL COMMENT '公示瑕疵',
-      right_term VARCHAR(300) NULL COMMENT '权利期限',
-      special_fields_json LONGTEXT NULL COMMENT '知识产权特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识产权汇总字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_ip_details (
-      paimai_id VARCHAR(32) NOT NULL COMMENT '标的 ID',
-      detail_index INT NOT NULL COMMENT '明细序号',
-      sequence_no VARCHAR(50) NULL COMMENT '原表序号',
-      ip_name VARCHAR(500) NULL COMMENT '知识产权名称',
-      certificate_no VARCHAR(300) NULL COMMENT '证书号/登记号/申请号',
-      ip_type VARCHAR(200) NULL COMMENT '知产类型',
-      application_date VARCHAR(100) NULL COMMENT '申请日/登记批准日原始值',
-      application_date_norm DATE NULL COMMENT '申请日/登记批准日标准化值',
-      patent_type VARCHAR(200) NULL COMMENT '专利类型',
-      status VARCHAR(500) NULL COMMENT '状态',
-      source_excerpt LONGTEXT NULL COMMENT '来源原文片段',
-      updated_at DATETIME NULL COMMENT '更新时间',
-      PRIMARY KEY (paimai_id, detail_index),
-      KEY idx_ip_detail_name (ip_name)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识产权逐项明细表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_goods (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      goods_category VARCHAR(300) NULL COMMENT '物资种类',
-      goods_name VARCHAR(500) NULL COMMENT '物资名称',
-      goods_location VARCHAR(500) NULL COMMENT '物资所在位置',
-      goods_details LONGTEXT NULL COMMENT '物资详情',
-      right_holder VARCHAR(500) NULL COMMENT '权利人',
-      disclosed_defects LONGTEXT NULL COMMENT '公示瑕疵',
-      right_burden LONGTEXT NULL COMMENT '权利负担',
-      special_fields_json LONGTEXT NULL COMMENT '物资产品特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='物资产品特有字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_usufruct (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      right_category VARCHAR(300) NULL COMMENT '权益种类',
-      subject_name VARCHAR(500) NULL COMMENT '标的名称',
-      subject_location VARCHAR(500) NULL COMMENT '标的所在位置',
-      subject_details LONGTEXT NULL COMMENT '标的物详情',
-      valid_period VARCHAR(300) NULL COMMENT '有效期',
-      original_right_holder VARCHAR(500) NULL COMMENT '原权利人',
-      disclosed_defects LONGTEXT NULL COMMENT '公示瑕疵',
-      right_burden LONGTEXT NULL COMMENT '权利负担',
-      special_fields_json LONGTEXT NULL COMMENT '用益物权特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用益物权特有字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_other (
-      paimai_id VARCHAR(32) PRIMARY KEY COMMENT '标的 ID',
-      raw_detail_text LONGTEXT NULL COMMENT '原始详情文本',
-      raw_table_pairs_json LONGTEXT NULL COMMENT '原始表格键值对 JSON',
-      special_fields_json LONGTEXT NULL COMMENT '其他类型特有字段 JSON',
-      updated_at DATETIME NULL COMMENT '更新时间'
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='其他类型字段表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS asset_dedup_index (
-      source_platform VARCHAR(50) NOT NULL COMMENT '来源平台',
-      source_item_id VARCHAR(80) NOT NULL COMMENT '来源平台标的 ID',
-      paimai_id VARCHAR(32) NOT NULL COMMENT '本库标的 ID',
-      dedup_hash VARCHAR(64) NOT NULL COMMENT '去重指纹',
-      asset_group VARCHAR(32) NULL COMMENT '资产类型',
-      project_name VARCHAR(500) NULL COMMENT '项目名称',
-      asset_location VARCHAR(500) NULL COMMENT '标的所在地',
-      identity_basis_json LONGTEXT NULL COMMENT '生成去重指纹的字段原值与标准化值',
-      updated_at DATETIME NULL COMMENT '更新时间',
-      PRIMARY KEY (source_platform, source_item_id),
-      KEY idx_dedup_hash (dedup_hash)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='跨平台去重索引表'
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS field_comments (
-      table_name VARCHAR(80) NOT NULL COMMENT '表名',
-      column_name VARCHAR(80) NOT NULL COMMENT '字段名',
-      label VARCHAR(120) NULL COMMENT '中文显示名',
-      comment TEXT NULL COMMENT '中文说明',
-      field_scope VARCHAR(50) NULL COMMENT '字段范围',
-      asset_group VARCHAR(32) NULL COMMENT '资产类型',
-      display_order INT NULL COMMENT '显示顺序',
-      PRIMARY KEY (table_name, column_name)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='预览页字段中文备注表'
-    """,
-]
-
-
-def field_comment_rows() -> list[tuple[str, str, str, str, str, str, int]]:
-    rows: list[tuple[str, str, str, str, str, str, int]] = []
-    base_comments = {
-        "auction_items_common": {
-            "paimai_id": ("标的ID", "京东拍卖标的唯一 ID。"),
-            "source_platform": ("来源平台", "数据来源平台，用于后续跨平台去重。"),
-            "source_item_id": ("来源平台标的ID", "该平台上的原始标的 ID。"),
-            "dedup_hash": ("去重指纹", "由资产类型、名称、地址、权证号、面积等关键要素生成。"),
-            "assessment_price_amount": ("评估价-数值", "评估价标准化金额，单位元；原文无评估价时必须为空。"),
-            "assessment_date": ("评估日期", "评估基准日或评估日期；原文无对应日期时为空。"),
-        },
-        "raw_payloads": {
-            "description_html": ("标的详情HTML", "标的物详情页 HTML 原文。"),
-            "notice_html": ("竞买须知HTML", "竞买须知页 HTML 原文。"),
-            "announcement_html": ("竞买公告HTML", "竞买公告页 HTML 原文。"),
-            "product_basic_json": ("商品基础信息原始JSON", "商品基础信息接口返回的原始数据，常包含竞价起止时间、评估价、处置/上传机构等结构化字段。"),
-        },
-    }
-    for table, columns in base_comments.items():
-        for order, (column, (label, comment)) in enumerate(columns.items(), start=1):
-            rows.append((table, column, label, comment, "system", "", order))
-    for order, field in enumerate(COMMON_FIELDS, start=100):
-        rows.append(
-            (
-                "auction_items_common",
-                field.key,
-                field.label,
-                f"所有资产类型都必须展示的共有字段：{field.label}。",
-                "common",
-                "ALL",
-                order,
-            )
-        )
-    for group, table in ASSET_TABLES.items():
-        rows.append((table, "paimai_id", "标的ID", "京东拍卖标的唯一 ID。", "system", group, 1))
-        for order, field in enumerate(SPECIAL_FIELDS[group], start=10):
-            rows.append(
-                (
-                    table,
-                    field.key,
-                    field.label,
-                    f"资产类型“{ASSET_GROUP_LABELS[group]}”的特有字段：{field.label}。",
-                    "special",
-                    group,
-                    order,
-                )
-            )
-        for offset, column in enumerate(SPECIAL_NORMALIZED_COLUMNS.get(group, {}), start=900):
-            rows.append((table, column, column, "特有字段生成的标准化伴生列。", "normalized", group, offset))
-    for table in ("asset_debt_details", "asset_ip_details"):
-        detail_label = "债权逐户明细" if table == "asset_debt_details" else "知识产权逐项明细"
-        rows.append((table, "paimai_id", "标的ID", detail_label, "detail", "", 1))
-        rows.append((table, "detail_index", "明细序号", "同一标的下的明细序号。", "detail", "", 2))
-    return rows
-
-
-def ensure_legacy_mysql_schema(config: MySQLConfig) -> None:
-    ensure_mysql_database(config)
-    with mysql_connection(config) as conn:
-        with conn.cursor() as cur:
-            for sql in MYSQL_SCHEMA:
-                cur.execute(sql)
-            cur.execute("SHOW COLUMNS FROM raw_payloads LIKE 'product_basic_json'")
-            if not cur.fetchone():
-                cur.execute(
-                    """
-                    ALTER TABLE raw_payloads
-                    ADD COLUMN product_basic_json LONGTEXT NULL COMMENT '商品基础信息接口原始 JSON'
-                    AFTER detail_json
-                    """
-                )
-            ensure_mysql_columns(
-                cur,
-                "auction_items_common",
-                {
-                    "disposal_agency": "VARCHAR(500) NULL COMMENT '处置机构/上传机构'",
-                    "start_price_display": "VARCHAR(100) NULL COMMENT '起拍价展示值'",
-                    "current_price_display": "VARCHAR(100) NULL COMMENT '当前价展示值'",
-                    "current_price_amount": "DECIMAL(18,2) NULL COMMENT '当前价标准化金额，单位元'",
-                    "final_price_display": "VARCHAR(100) NULL COMMENT '最终价/当前价展示值'",
-                },
-            )
-            ensure_mysql_columns(
-                cur,
-                "field_extractions",
-                {
-                    "value_type": "VARCHAR(30) NULL COMMENT '值类型：text/money/date/datetime'",
-                    "numeric_value": "DECIMAL(18,2) NULL COMMENT '数值或金额类字段的标准化数值'",
-                    "date_value": "DATE NULL COMMENT '日期类字段的标准化日期'",
-                    "datetime_value": "DATETIME NULL COMMENT '时间类字段的标准化时间'",
-                },
-            )
-            ensure_mysql_columns(
-                cur,
-                "asset_dedup_index",
-                {
-                    "identity_basis_json": "LONGTEXT NULL COMMENT '生成去重指纹的字段原值与标准化值'",
-                },
-            )
-            seed_mysql_field_comments(cur)
-        conn.commit()
-
-
-def seed_mysql_field_comments(cur) -> None:
-    rows = field_comment_rows()
-    if not rows:
-        return
-    cur.executemany(
+def mysql_table_exists(cur, table_name: str) -> bool:
+    cur.execute(
         """
-        INSERT INTO field_comments
-          (table_name, column_name, label, comment, field_scope, asset_group, display_order)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-          label=VALUES(label),
-          comment=VALUES(comment),
-          field_scope=VALUES(field_scope),
-          asset_group=VALUES(asset_group),
-          display_order=VALUES(display_order)
+        SELECT COUNT(*) AS cnt
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
         """,
-        rows,
+        (table_name,),
     )
+    row = cur.fetchone()
+    if isinstance(row, dict):
+        return int(row.get("cnt") or 0) > 0
+    return int(row[0] if row else 0) > 0
 
 
 def mysql_column_types(cur, table: str) -> dict[str, str]:
     cur.execute(f"SHOW COLUMNS FROM `{table}`")
     return {row["Field"]: row["Type"].lower() for row in cur.fetchall()}
 
-
-def sqlite_table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
-    return [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
 
 def ensure_mysql_columns(cur, table: str, columns: dict[str, str]) -> None:
@@ -566,29 +107,34 @@ def ensure_mysql_columns(cur, table: str, columns: dict[str, str]) -> None:
             cur.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}")
 
 
-def coerce_mysql_value(value: Any, column_type: str) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", errors="ignore")
-    text = str(value)
-    if text == "":
-        return None if any(token in column_type for token in ("date", "time", "decimal", "int")) else ""
-    if "datetime" in column_type or "timestamp" in column_type:
-        return datetime_to_db(text)
-    if column_type == "date":
-        return date_to_db(text)
-    if any(token in column_type for token in ("decimal", "int")):
-        try:
-            number = Decimal(text.replace(",", ""))
-        except (InvalidOperation, AttributeError):
-            return None
-        if "int" in column_type:
-            return int(number)
-        return format(number.quantize(Decimal("0.01")), "f")
-    return text
+def ensure_ai_model_profile_columns(cur) -> None:
+    """Keep existing ai_model_profiles tables compatible with the current schema."""
+    if not mysql_table_exists(cur, "ai_model_profiles"):
+        return
+    ensure_mysql_columns(
+        cur,
+        "ai_model_profiles",
+        {
+            "max_concurrency": "INT NULL COMMENT '该模型配置建议最大并发数；为空则由任务参数决定'",
+            "task_types": "JSON NULL COMMENT '适用任务类型数组，如 text/long_text/debt/vision/attachment；空表示通用'",
+            "priority": "INT NOT NULL DEFAULT 100 COMMENT '调度优先级，数字越小越优先'",
+        },
+    )
+
+
+def ensure_ai_enrichment_queue_columns(cur) -> None:
+    """Keep existing ai_enrichment_queue tables compatible with current worker states."""
+    if not mysql_table_exists(cur, "ai_enrichment_queue"):
+        return
+    ensure_mysql_columns(
+        cur,
+        "ai_enrichment_queue",
+        {
+            "running_profile_name": "VARCHAR(100) NULL COMMENT '实际处理AI配置名'",
+            "running_provider": "VARCHAR(80) NULL COMMENT '实际处理AI供应商'",
+            "running_model_name": "VARCHAR(200) NULL COMMENT '实际处理AI模型'",
+        },
+    )
 
 
 def upsert_rows(cur, table: str, rows: Iterable[dict[str, Any]], column_types: dict[str, str]) -> int:
@@ -632,701 +178,6 @@ def update_row_columns(
     return cur.rowcount
 
 
-def legacy_mysql_table_names() -> list[str]:
-    return [
-        "field_comments",
-        "asset_dedup_index",
-        "asset_ip_details",
-        "asset_debt_details",
-        *ASSET_TABLES.values(),
-        "auction_items_common",
-        "field_extractions",
-        "field_catalog",
-        "raw_payloads",
-        "crawl_batches",
-    ]
-
-
-def reset_legacy_mysql_tables(config: MySQLConfig) -> None:
-    ensure_mysql_database(config)
-    with mysql_connection(config) as conn:
-        with conn.cursor() as cur:
-            for table in legacy_mysql_table_names():
-                cur.execute(f"DROP TABLE IF EXISTS `{table}`")
-        conn.commit()
-
-
-class _LegacyMySQLJDScraperDatabase:
-    def __init__(self, config: MySQLConfig) -> None:
-        self.config = config
-
-    def init_schema(self) -> None:
-        ensure_legacy_mysql_schema(self.config)
-
-    def seed_field_catalog(self) -> None:
-        rows: list[dict[str, Any]] = []
-        for order, field in enumerate(COMMON_FIELDS, start=1):
-            rows.append(
-                {
-                    "field_namespace": "common",
-                    "asset_group": "ALL",
-                    "field_key": field.key,
-                    "field_label": field.label,
-                    "field_scope": "common",
-                    "data_type": COMMON_FIELD_DATA_TYPES.get(field.key, "TEXT"),
-                    "required_for_display": 1,
-                    "aliases_json": safe_json_dumps((field.label, *field.aliases)),
-                    "source_priority_json": safe_json_dumps(["structured_api", "html_table", "html_text"]),
-                    "export_order": order,
-                }
-            )
-        for group, fields in SPECIAL_FIELDS.items():
-            for order, field in enumerate(fields, start=10):
-                rows.append(
-                    {
-                        "field_namespace": f"special.{group}",
-                        "asset_group": group,
-                        "field_key": field.key,
-                        "field_label": field.label,
-                        "field_scope": "special",
-                        "data_type": SPECIAL_FIELD_DATA_TYPES.get(group, {}).get(field.key, "TEXT"),
-                        "required_for_display": 1,
-                        "aliases_json": safe_json_dumps((field.label, *field.aliases)),
-                        "source_priority_json": safe_json_dumps(["structured_api", "html_table", "html_text"]),
-                        "export_order": order,
-                    }
-                )
-        with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                column_types = mysql_column_types(cur, "field_catalog")
-                upsert_rows(cur, "field_catalog", rows, column_types)
-            conn.commit()
-
-    def start_batch(self, parameters: dict[str, Any]) -> str:
-        import datetime as _dt
-        import uuid as _uuid
-
-        batch_id = _dt.datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + _uuid.uuid4().hex[:8]
-        row = {
-            "batch_id": batch_id,
-            "started_at": now_text(),
-            "parameters_json": safe_json_dumps(parameters),
-            "status": "running",
-            "summary_json": safe_json_dumps({"parameters": parameters, "status": "running", "message": ""}),
-        }
-        with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                upsert_rows(cur, "crawl_batches", [row], mysql_column_types(cur, "crawl_batches"))
-            conn.commit()
-        return batch_id
-
-    def finish_batch(self, batch_id: str, status: str, message: str = "") -> None:
-        with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT summary_json, parameters_json FROM crawl_batches WHERE batch_id=%s", (batch_id,))
-                stored = cur.fetchone() or {}
-                summary: dict[str, Any] = {}
-                if stored.get("summary_json"):
-                    try:
-                        summary = json.loads(stored["summary_json"])
-                    except json.JSONDecodeError:
-                        summary = {}
-                if not summary and stored.get("parameters_json"):
-                    try:
-                        summary["parameters"] = json.loads(stored["parameters_json"])
-                    except json.JSONDecodeError:
-                        summary["parameters"] = stored["parameters_json"]
-                summary.update({"status": status, "message": message})
-                cur.execute(
-                    """
-                    UPDATE crawl_batches
-                    SET finished_at=%s, status=%s, message=%s, summary_json=%s
-                    WHERE batch_id=%s
-                    """,
-                    (now_text(), status, message, safe_json_dumps(summary), batch_id),
-                )
-            conn.commit()
-
-    def upsert_raw_payloads(
-        self,
-        *,
-        paimai_id: str,
-        batch_id: str,
-        source_url: str,
-        source_platform: str = "jd",
-        source_item_id: str | None = None,
-        source_site_name: str | None = None,
-        list_json: Any,
-        detail_json: Any,
-        realtime_json: Any,
-        description_html: str | None,
-        product_basic_json: Any = None,
-        notice_html: str | None = None,
-        announcement_html: str | None = None,
-        attachments_json: Any = None,
-        vendor_json: Any = None,
-    ) -> None:
-        row = {
-            "paimai_id": paimai_id,
-            "batch_id": batch_id,
-            "source_url": source_url,
-            "list_json": safe_json_dumps(list_json),
-            "detail_json": safe_json_dumps(detail_json),
-            "product_basic_json": safe_json_dumps(product_basic_json or {}),
-            "realtime_json": safe_json_dumps(realtime_json),
-            "description_html": description_html or "",
-            "notice_html": notice_html or "",
-            "announcement_html": announcement_html or "",
-            "attachments_json": safe_json_dumps(attachments_json),
-            "attachment_texts": "",
-            "vendor_json": safe_json_dumps(vendor_json or {}),
-            "crawled_at": now_text(),
-        }
-        self._upsert("raw_payloads", row)
-
-    def update_attachment_texts(self, paimai_id: str, attachment_texts: Any) -> None:
-        with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE raw_payloads SET attachment_texts=%s WHERE paimai_id=%s",
-                    (safe_json_dumps(attachment_texts), paimai_id),
-                )
-            conn.commit()
-
-    def upsert_common_item(
-        self,
-        *,
-        paimai_id: str,
-        batch_id: str,
-        asset_group: str,
-        jd_category_id: str,
-        jd_category_name: str,
-        values: dict[str, Any],
-        field_results: dict[str, dict[str, Any]],
-        special_values: dict[str, Any] | None = None,
-    ) -> None:
-        full_values = {field.key: compact_text(values.get(field.key)) for field in COMMON_FIELDS}
-        normalized_values = normalized_common_db_values(
-            asset_group=asset_group,
-            common_values=full_values,
-            special_values=special_values or {},
-        )
-        normalized_values["source_item_id"] = paimai_id
-        row = {
-            "paimai_id": paimai_id,
-            "batch_id": batch_id,
-            "source_url": f"https://paimai.jd.com/{paimai_id}",
-            "asset_group": asset_group,
-            "asset_group_label": ASSET_GROUP_LABELS[asset_group],
-            "jd_category_id": jd_category_id,
-            "jd_category_name": jd_category_name,
-            **full_values,
-            **normalized_values,
-            "common_fields_json": safe_json_dumps(full_values),
-            "updated_at": now_text(),
-        }
-        self._upsert("auction_items_common", row)
-        self.upsert_dedup_index(
-            paimai_id=paimai_id,
-            asset_group=asset_group,
-            common_values=full_values,
-            special_values=special_values or {},
-            dedup_hash=normalized_values.get("dedup_hash"),
-        )
-        self._upsert_field_extractions(
-            paimai_id=paimai_id,
-            namespace="common",
-            asset_group=asset_group,
-            fields=COMMON_FIELDS,
-            values=full_values,
-            field_results=field_results,
-        )
-
-    def upsert_special_item(
-        self,
-        *,
-        paimai_id: str,
-        asset_group: str,
-        values: dict[str, Any],
-        field_results: dict[str, dict[str, Any]],
-        source_platform: str = "jd",
-    ) -> None:
-        fields = SPECIAL_FIELDS[asset_group]
-        full_values = {field.key: compact_text(values.get(field.key)) for field in fields}
-        table = ASSET_TABLES[asset_group]
-        row = {
-            "paimai_id": paimai_id,
-            **full_values,
-            **normalized_special_db_values(asset_group, full_values),
-            "special_fields_json": safe_json_dumps(full_values),
-            "updated_at": now_text(),
-        }
-        self._upsert(table, row)
-        if asset_group == "debt":
-            self._clear_legacy_debt_aggregate_columns(paimai_id)
-        self._upsert_field_extractions(
-            paimai_id=paimai_id,
-            namespace=f"special.{asset_group}",
-            asset_group=asset_group,
-            fields=fields,
-            values=full_values,
-            field_results=field_results,
-        )
-
-    def upsert_dedup_index(
-        self,
-        *,
-        paimai_id: str,
-        asset_group: str,
-        common_values: dict[str, Any],
-        special_values: dict[str, Any],
-        dedup_hash: Any,
-    ) -> None:
-        if not compact_text(dedup_hash):
-            return
-        fields = DEDUP_FIELDS_CONFIG.get(asset_group) or DEDUP_FIELDS_CONFIG["other"]
-        identity_basis: dict[str, dict[str, str | None]] = {}
-        for field_key in fields:
-            raw_value = special_values.get(field_key)
-            if not compact_text(raw_value):
-                raw_value = common_values.get(field_key)
-            normalized = normalize_dedup_part(field_key, raw_value)
-            if normalized:
-                identity_basis[field_key] = {"raw": compact_text(raw_value), "normalized": normalized}
-        self._upsert(
-            "asset_dedup_index",
-            {
-                "source_platform": "jd",
-                "source_item_id": paimai_id,
-                "paimai_id": paimai_id,
-                "dedup_hash": compact_text(dedup_hash),
-                "asset_group": asset_group,
-                "project_name": common_values.get("project_name"),
-                "asset_location": common_values.get("asset_location"),
-                "identity_basis_json": safe_json_dumps(identity_basis),
-                "updated_at": now_text(),
-            },
-        )
-
-    def upsert_debt_details(self, *, paimai_id: str, details: list[dict[str, Any]]) -> None:
-        with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM asset_debt_details WHERE paimai_id=%s", (paimai_id,))
-                column_types = mysql_column_types(cur, "asset_debt_details")
-                rows = []
-                for index, detail in enumerate(details, start=1):
-                    principal_balance = compact_text(detail.get("principal_balance"))
-                    interest_balance = compact_text(detail.get("interest_balance"))
-                    recovery_fee = compact_text(detail.get("recovery_fee"))
-                    claim_total = compact_text(detail.get("claim_total"))
-                    benchmark_date = compact_text(detail.get("benchmark_date"))
-                    rows.append(
-                        {
-                            "paimai_id": paimai_id,
-                            "detail_index": index,
-                            "sequence_no": compact_text(detail.get("sequence_no")),
-                            "debtor_name": compact_text(detail.get("debtor_name") or detail.get("debtor_or_asset")),
-                            "principal_balance": principal_balance,
-                            "principal_balance_amount": decimal_to_db(money_numeric(principal_balance)),
-                            "interest_balance": interest_balance,
-                            "interest_balance_amount": decimal_to_db(money_numeric(interest_balance)),
-                            "recovery_fee": recovery_fee,
-                            "recovery_fee_amount": decimal_to_db(money_numeric(recovery_fee)),
-                            "claim_total": claim_total,
-                            "claim_total_amount": decimal_to_db(money_numeric(claim_total)),
-                            "collateral": compact_text(detail.get("collateral")),
-                            "guarantor": compact_text(detail.get("guarantor") or detail.get("guarantor_or_related_party")),
-                            "litigation_status": compact_text(detail.get("litigation_status")),
-                            "benchmark_date": benchmark_date,
-                            "benchmark_date_norm": date_to_db(benchmark_date),
-                            "amount_unit": compact_text(detail.get("amount_unit")),
-                            "source_excerpt": (compact_text(detail.get("source_excerpt")) or "")[:500],
-                            "updated_at": now_text(),
-                        }
-                    )
-                upsert_rows(cur, "asset_debt_details", rows, column_types)
-            conn.commit()
-
-    def upsert_ip_details(self, *, paimai_id: str, details: list[dict[str, Any]]) -> None:
-        with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM asset_ip_details WHERE paimai_id=%s", (paimai_id,))
-                column_types = mysql_column_types(cur, "asset_ip_details")
-                rows = []
-                for index, detail in enumerate(details, start=1):
-                    application_date = compact_text(detail.get("application_date"))
-                    rows.append(
-                        {
-                            "paimai_id": paimai_id,
-                            "detail_index": index,
-                            "sequence_no": compact_text(detail.get("sequence_no")) or str(index),
-                            "ip_name": compact_text(detail.get("ip_name")),
-                            "certificate_no": compact_text(detail.get("certificate_no")),
-                            "ip_type": compact_text(detail.get("ip_type")),
-                            "application_date": application_date,
-                            "application_date_norm": date_to_db(application_date),
-                            "patent_type": compact_text(detail.get("patent_type")),
-                            "status": compact_text(detail.get("status")),
-                            "source_excerpt": (compact_text(detail.get("source_excerpt")) or "")[:500],
-                            "updated_at": now_text(),
-                        }
-                    )
-                upsert_rows(cur, "asset_ip_details", rows, column_types)
-            conn.commit()
-
-    def export_csvs(self, output_dir: Path) -> dict[str, Path]:
-        return {}
-
-    def _upsert(self, table: str, row: dict[str, Any]) -> None:
-        with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                upsert_rows(cur, table, [row], mysql_column_types(cur, table))
-            conn.commit()
-
-    def _clear_legacy_debt_aggregate_columns(self, paimai_id: str) -> None:
-        with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                column_types = mysql_column_types(cur, ASSET_TABLES["debt"])
-                columns = [column for column in DEBT_LEGACY_AGGREGATE_FIELDS if column in column_types]
-                if columns:
-                    assignments = ", ".join(f"`{column}`=NULL" for column in columns)
-                    cur.execute(f"UPDATE `{ASSET_TABLES['debt']}` SET {assignments} WHERE paimai_id=%s", (paimai_id,))
-            conn.commit()
-
-    def _upsert_field_extractions(
-        self,
-        *,
-        paimai_id: str,
-        namespace: str,
-        asset_group: str,
-        fields: tuple[FieldDef, ...],
-        values: dict[str, Any],
-        field_results: dict[str, dict[str, Any]],
-    ) -> None:
-        rows: list[dict[str, Any]] = []
-        for field in fields:
-            value = values.get(field.key)
-            result = field_results.get(field.key, {})
-            status = result.get("status") or ("extracted" if compact_text(value) else "missing_on_page")
-            typed_values = typed_field_extraction_values(field.key, value)
-            rows.append(
-                {
-                    "paimai_id": paimai_id,
-                    "field_namespace": namespace,
-                    "asset_group": asset_group,
-                    "field_key": field.key,
-                    "field_label": field.label,
-                    "raw_value": compact_text(value),
-                    "normalized_value": compact_text(value),
-                    **typed_values,
-                    "status": status,
-                    "method": result.get("method", "not_found" if not compact_text(value) else "api_or_html"),
-                    "confidence": float(result.get("confidence", 0.95 if compact_text(value) else 0.0)),
-                    "source_payload_type": result.get("source_payload_type", ""),
-                    "source_path": result.get("source_path", ""),
-                    "source_excerpt": compact_text(result.get("source_excerpt")),
-                    "missing_reason": "" if compact_text(value) else result.get("missing_reason", "页面或接口未提供该字段"),
-                    "extracted_at": now_text(),
-                }
-            )
-        with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                valid_keys = [field.key for field in fields]
-                if valid_keys:
-                    cur.execute(
-                        f"""
-                        DELETE FROM field_extractions
-                        WHERE paimai_id=%s
-                          AND field_namespace=%s
-                          AND field_key NOT IN ({qmarks(len(valid_keys))})
-                        """,
-                        [paimai_id, namespace, *valid_keys],
-                    )
-                upsert_rows(cur, "field_extractions", rows, mysql_column_types(cur, "field_extractions"))
-            conn.commit()
-
-
-def clean_invalid_assessment_rows(sqlite_path: Path) -> int:
-    if not sqlite_path.exists():
-        return 0
-    cleared = 0
-    conn = sqlite3.connect(sqlite_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            """
-            SELECT c.paimai_id, c.assessment_price_time, fe.source_excerpt,
-                   fe.source_payload_type, fe.source_path
-            FROM auction_items_common c
-            LEFT JOIN field_extractions fe
-              ON fe.paimai_id = c.paimai_id
-             AND fe.field_namespace = 'common'
-             AND fe.field_key = 'assessment_price_time'
-            WHERE c.assessment_price_time IS NOT NULL
-              AND c.assessment_price_time != ''
-            """
-        ).fetchall()
-        for row in rows:
-            source_path = row["source_path"] or ""
-            source_payload_type = row["source_payload_type"] or ""
-            structured_assessment_field = source_payload_type in {"list_json", "detail_json", "product_basic_json"} and any(
-                marker in source_path
-                for marker in (
-                    "assessmentPrice",
-                    "marketPrice",
-                    "judicatureBasicInfoResult.marketPrice",
-                )
-            )
-            if is_valid_assessment_price_time(
-                row["assessment_price_time"],
-                row["source_excerpt"],
-                structured_assessment_field=structured_assessment_field,
-                require_source_assessment_signal=False,
-            ):
-                continue
-            conn.execute(
-                """
-                UPDATE auction_items_common
-                SET assessment_price_time='',
-                    assessment_price_amount=NULL,
-                    assessment_amount=NULL,
-                    assessment_date=NULL
-                WHERE paimai_id=?
-                """,
-                (row["paimai_id"],),
-            )
-            conn.execute(
-                """
-                UPDATE field_extractions
-                SET raw_value='',
-                    normalized_value='',
-                    status='missing_on_page',
-                    method='validation',
-                    confidence=0,
-                    source_payload_type='validation',
-                    source_path='invalid_assessment_filtered',
-                    source_excerpt=?,
-                    missing_reason='原文未提供明确评估价格或评估日期，已过滤比例/比较描述'
-                WHERE paimai_id=?
-                  AND field_namespace='common'
-                  AND field_key='assessment_price_time'
-                """,
-                (row["source_excerpt"], row["paimai_id"]),
-            )
-            cleared += 1
-        conn.commit()
-    finally:
-        conn.close()
-    return cleared
-
-
-def import_sqlite_to_mysql(sqlite_path: Path, config: MySQLConfig, *, clean_assessment: bool = True) -> dict[str, int]:
-    ensure_legacy_mysql_schema(config)
-    if clean_assessment:
-        clean_invalid_assessment_rows(sqlite_path)
-
-    tables = [
-        "crawl_batches",
-        "raw_payloads",
-        "field_catalog",
-        "field_extractions",
-        "auction_items_common",
-        *ASSET_TABLES.values(),
-        "asset_debt_details",
-        "asset_ip_details",
-        "asset_dedup_index",
-    ]
-    imported: dict[str, int] = {}
-    source = sqlite3.connect(sqlite_path)
-    source.row_factory = sqlite3.Row
-    try:
-        with mysql_connection(config) as dest:
-            with dest.cursor() as cur:
-                for table in tables:
-                    if not sqlite_table_columns(source, table):
-                        continue
-                    column_types = mysql_column_types(cur, table)
-                    rows = [dict(row) for row in source.execute(f"SELECT * FROM {table}")]
-                    imported[table] = upsert_rows(cur, table, rows, column_types)
-            dest.commit()
-    finally:
-        source.close()
-    return imported
-
-
-def get_items_mysql(config: MySQLConfig, filters: dict[str, str] | None = None) -> dict[str, Any]:
-    filters = filters or {}
-    clauses: list[str] = []
-    params: list[Any] = []
-    if filters.get("asset_group"):
-        clauses.append("c.asset_group = %s")
-        params.append(filters["asset_group"])
-    if filters.get("project_status"):
-        clauses.append("c.project_status = %s")
-        params.append(filters["project_status"])
-    if filters.get("q"):
-        clauses.append(
-            """
-            (
-              c.project_name LIKE %s
-              OR c.asset_location LIKE %s
-              OR c.disposal_party LIKE %s
-              OR EXISTS (
-                SELECT 1 FROM field_extractions fx
-                WHERE fx.paimai_id = c.paimai_id
-                  AND fx.raw_value LIKE %s
-              )
-            )
-            """
-        )
-        like = f"%{filters['q']}%"
-        params.extend([like, like, like, like])
-    if filters.get("issue") == "missing":
-        clauses.append("EXISTS (SELECT 1 FROM field_extractions fm WHERE fm.paimai_id=c.paimai_id AND fm.status!='extracted')")
-    where = "WHERE " + " AND ".join(clauses) if clauses else ""
-    with mysql_connection(config) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT
-                  c.paimai_id,
-                  c.asset_group,
-                  c.asset_group_label,
-                  c.jd_category_id,
-                  c.jd_category_name,
-                  c.project_name,
-                  c.asset_location,
-                  c.project_status,
-                  c.start_price_raw,
-                  c.final_price_raw,
-                  c.disposal_party,
-                  COUNT(fe.field_key) AS total_fields,
-                  SUM(CASE WHEN fe.status='extracted' THEN 1 ELSE 0 END) AS extracted_fields,
-                  SUM(CASE WHEN fe.status!='extracted' THEN 1 ELSE 0 END) AS issue_fields
-                FROM auction_items_common c
-                LEFT JOIN field_extractions fe ON fe.paimai_id = c.paimai_id
-                {where}
-                GROUP BY c.paimai_id
-                ORDER BY CAST(c.jd_category_id AS UNSIGNED), c.paimai_id
-                """,
-                params,
-            )
-            items = cur.fetchall()
-            cur.execute(
-                "SELECT asset_group, asset_group_label, COUNT(*) AS count "
-                "FROM auction_items_common GROUP BY asset_group, asset_group_label ORDER BY asset_group"
-            )
-            asset_groups = cur.fetchall()
-            cur.execute(
-                "SELECT DISTINCT project_status FROM auction_items_common "
-                "WHERE project_status IS NOT NULL AND project_status!='' ORDER BY project_status"
-            )
-            statuses = [row["project_status"] for row in cur.fetchall()]
-    return {"items": items, "asset_groups": asset_groups, "statuses": statuses}
-
-
-def table_comments_mysql(cur, table: str) -> dict[str, dict[str, Any]]:
-    cur.execute("SELECT * FROM field_comments WHERE table_name=%s", (table,))
-    return {row["column_name"]: row for row in cur.fetchall()}
-
-
-def get_item_detail_mysql(config: MySQLConfig, paimai_id: str) -> dict[str, Any]:
-    with mysql_connection(config) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM auction_items_common WHERE paimai_id=%s", (paimai_id,))
-            item = cur.fetchone()
-            if item is None:
-                raise KeyError(f"找不到标的：{paimai_id}")
-            group = item["asset_group"]
-            special_table = ASSET_TABLES[group]
-            cur.execute(f"SELECT * FROM `{special_table}` WHERE paimai_id=%s", (paimai_id,))
-            special_row = cur.fetchone() or {}
-            debt_details: list[dict[str, Any]] = []
-            if group == "debt":
-                cur.execute("SELECT * FROM asset_debt_details WHERE paimai_id=%s ORDER BY detail_index", (paimai_id,))
-                debt_details = cur.fetchall()
-            ip_details: list[dict[str, Any]] = []
-            if group == "ip":
-                cur.execute("SELECT * FROM asset_ip_details WHERE paimai_id=%s ORDER BY detail_index", (paimai_id,))
-                ip_details = cur.fetchall()
-            cur.execute("SELECT * FROM raw_payloads WHERE paimai_id=%s", (paimai_id,))
-            raw = cur.fetchone() or {}
-            duplicates: list[dict[str, Any]] = []
-            if item.get("dedup_hash"):
-                cur.execute(
-                    """
-                    SELECT source_platform, source_item_id, paimai_id, asset_group,
-                           project_name, asset_location, updated_at
-                    FROM asset_dedup_index
-                    WHERE dedup_hash = %s
-                      AND paimai_id != %s
-                    ORDER BY updated_at DESC
-                    """,
-                    (item["dedup_hash"], paimai_id),
-                )
-                duplicates = cur.fetchall()
-            common_comments = table_comments_mysql(cur, "auction_items_common")
-            special_comments = table_comments_mysql(cur, special_table)
-
-            def load_fields(namespace: str, comments: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-                cur.execute(
-                    """
-                    SELECT fe.*, fc.export_order
-                    FROM (
-                        SELECT *,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY field_key
-                                ORDER BY is_selected DESC, extraction_id DESC
-                            ) AS rn
-                        FROM field_extractions
-                        WHERE paimai_id = %s AND field_namespace = %s
-                    ) fe
-                    LEFT JOIN field_catalog fc
-                      ON fc.field_namespace = fe.field_namespace
-                     AND fc.field_key = fe.field_key
-                    WHERE fe.rn = 1
-                    ORDER BY COALESCE(fc.export_order, 999), fe.field_key
-                    """,
-                    (paimai_id, namespace),
-                )
-                fields = []
-                for row in cur.fetchall():
-                    comment = comments.get(row["field_key"])
-                    fields.append(
-                        {
-                            "key": row["field_key"],
-                            "label": row["field_label"],
-                            "comment": comment["comment"] if comment else "字段说明未配置。",
-                            "value": row["normalized_value"],
-                            "raw_value": row["raw_value"],
-                            "status": row["status"],
-                            "status_label": row["status"],
-                            "method": row["method"],
-                            "confidence": row["confidence"],
-                            "source_payload_type": row["source_payload_type"],
-                            "source_path": row["source_path"],
-                            "source_excerpt": row["source_excerpt"],
-                            "missing_reason": row["missing_reason"],
-                        }
-                    )
-                return fields
-
-            common_fields = load_fields("common", common_comments)
-            special_fields = load_fields(f"special.{group}", special_comments)
-
-    return {
-        "item": item,
-        "special_row": special_row,
-        "raw": raw,
-        "common_fields": common_fields,
-        "special_fields": special_fields,
-        "debt_details": debt_details,
-        "ip_details": ip_details,
-        "duplicates": duplicates,
-        "asset_group_label": ASSET_GROUP_LABELS[group],
-    }
-
-
 # ===== MySQL V2 storage adapter =====
 
 V2_SCHEMA_PATH = Path(__file__).with_name("sql") / "mysql_schema_v2.sql"
@@ -1352,15 +203,23 @@ V2_DROP_TABLES = [
     "field_extractions",
     "field_catalog",
     "raw_payloads",
+    "dead_letter_queue",
+    "crawl_queue_events",
+    "crawl_checkpoints",
     "crawl_queue",
     "auction_items",
     "crawl_batches",
     "crawl_job_runs",
     "crawl_jobs",
-    # Old preview-schema tables kept here so --reset removes mixed local test data.
+]
+
+LEGACY_DROP_TABLES = [
+    "crawl_queue_items",
     "field_comments",
     "auction_items_common",
 ]
+
+RESET_DROP_TABLES = [*V2_DROP_TABLES, *LEGACY_DROP_TABLES]
 
 V2_SPECIAL_TABLES = {
     "land": "asset_land",
@@ -1381,14 +240,57 @@ def _blank_to_none(value: Any) -> Any:
     return text if text else None
 
 
-def _money_decimal(value: Any) -> Decimal | None:
+def _money_decimal(value: Any) -> Optional[Decimal]:
     amount = money_numeric(value)
     if amount is None:
         return None
     return amount.quantize(Decimal("0.01"))
 
 
-def _area_decimal(value: Any) -> Decimal | None:
+def _valid_price_display(value: Any) -> bool:
+    text = compact_text(value)
+    if not text:
+        return False
+    if _money_decimal(text) is not None:
+        return True
+    return any(token in text for token in ("面议", "详见", "无底价", "免费", "以公告为准", "另行通知"))
+
+
+def _debt_detail_unit_multiplier(detail: Mapping[str, Any] | None) -> Decimal:
+    if not detail:
+        return Decimal("1")
+    unit_text = " ".join(
+        compact_text(detail.get(key))
+        for key in (
+            "money_unit",
+            "amount_unit",
+            "unit",
+            "table_unit",
+            "source_excerpt",
+            "table_header",
+            "source_payload",
+        )
+        if compact_text(detail.get(key))
+    )
+    if re.search(r"((?:单位|金额单位))\s*[:：]?\s*亿|[（(]亿元[）)]|单位[:：]?\s*人民币亿元", unit_text):
+        return Decimal("100000000")
+    if re.search(r"((?:单位|金额单位))\s*[:：]?\s*万|[（(]万元[）)]|单位[:：]?\s*人民币万元", unit_text):
+        return Decimal("10000")
+    return Decimal("1")
+
+
+def _debt_detail_money_decimal(value: Any, detail: Mapping[str, Any] | None = None) -> Optional[Decimal]:
+    amount = money_numeric(value)
+    if amount is None:
+        return None
+    text = compact_text(value)
+    has_explicit_unit = bool(re.search(r"(?:元|万)|亿", text))
+    if not has_explicit_unit:
+        amount *= _debt_detail_unit_multiplier(detail)
+    return amount.quantize(Decimal("0.01"))
+
+
+def _area_decimal(value: Any) -> Optional[Decimal]:
     area = area_sqm_to_db(value)
     if area is None:
         return None
@@ -1398,7 +300,7 @@ def _area_decimal(value: Any) -> Decimal | None:
         return None
 
 
-def _int_or_none(value: Any) -> int | None:
+def _int_or_none(value: Any) -> Optional[int]:
     text = compact_text(value)
     if not text:
         return None
@@ -1422,7 +324,7 @@ def _parse_json_maybe(value: Any) -> Any:
         return value
 
 
-def _json_or_none(value: Any) -> str | None:
+def _json_or_none(value: Any) -> Optional[str]:
     if value is None:
         return None
     return safe_json_dumps(value)
@@ -1451,7 +353,7 @@ def _payload_tab(payload_type: str) -> str:
     }.get(payload_type, payload_type)
 
 
-def _resource_role(name: str, resource_type: str, asset_group: str | None = None) -> str:
+def _resource_role(name: str, resource_type: str, asset_group: Optional[str] = None) -> str:
     text = name or ""
     if resource_type == "image":
         if asset_group == "vehicle":
@@ -1474,7 +376,7 @@ def _resource_role(name: str, resource_type: str, asset_group: str | None = None
     return "attachment_file"
 
 
-def _normalize_resource_url(url: Any, resource_type: str) -> str | None:
+def _normalize_resource_url(url: Any, resource_type: str) -> Optional[str]:
     text = compact_text(url)
     if not text:
         return None
@@ -1526,13 +428,13 @@ def _valid_assessment_text(
     )
     if structured_field:
         return _money_decimal(text) is not None
-    if re.fullmatch(r"\s*(市场价|评估价|参考价)\s*\d+(?:\.\d+)?\s*", text):
+    if re.fullmatch(r"\s*((?:市场价|评估价)|参考价)\s*\d+(?:\.\d+)?\s*", text):
         return False
-    if re.search(r"\d+(?:\.\d+)?\s*(倍|折|成)", text) and not re.search(r"(元|万元|亿元|￥|¥)", text):
+    if re.search(r"\d+(?:\.\d+)?\s*((?:倍|折)|成)", text) and not re.search(r"((?:元|万元)|亿元|￥|¥)", text):
         return False
-    if not re.search(r"(评估价|评估价格|评估价值|市场价|市场价格|参考价|估价)", text):
+    if not re.search(r"((?:评估价|评估价格)|(?:评估价值|市场价)|(?:市场价格|参考价)|估价)", text):
         return False
-    if not re.search(r"(元|万元|亿元|￥|¥)", text):
+    if not re.search(r"((?:元|万元)|亿元|￥|¥)", text):
         return False
     return is_valid_assessment_price_time(
         text,
@@ -1542,7 +444,7 @@ def _valid_assessment_text(
     )
 
 
-def _assessment_basis(value: Any) -> str | None:
+def _assessment_basis(value: Any) -> Optional[str]:
     text = compact_text(value) or ""
     if "市场价" in text or "市场价格" in text:
         return "market_price"
@@ -1555,7 +457,7 @@ def _assessment_basis(value: Any) -> str | None:
     return None
 
 
-def _bid_count(value: Any) -> int | None:
+def _bid_count(value: Any) -> Optional[int]:
     parsed = _parse_json_maybe(value)
     if isinstance(parsed, list):
         return len(parsed)
@@ -1570,10 +472,10 @@ def _bid_count(value: Any) -> int | None:
 def build_v2_common_item_row(
     *,
     paimai_id: str,
-    batch_id: str | None,
+    batch_id: Optional[str],
     asset_group: str,
-    jd_category_id: str | None,
-    jd_category_name: str | None,
+    jd_category_id: Optional[str],
+    jd_category_name: Optional[str],
     values: dict[str, Any],
     special_values: dict[str, Any] | None = None,
     field_results: dict[str, dict[str, Any]] | None = None,
@@ -1659,8 +561,8 @@ def build_v2_resource_rows(
     *,
     item_id: int,
     attachments_json: Any,
-    asset_group: str | None = None,
-    source_payload_id: int | None = None,
+    asset_group: Optional[str] = None,
+    source_payload_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     parsed = _parse_json_maybe(attachments_json)
     rows: list[dict[str, Any]] = []
@@ -1928,6 +830,10 @@ def mysql_table_names() -> list[str]:
     return list(V2_DROP_TABLES)
 
 
+def mysql_reset_table_names() -> list[str]:
+    return list(RESET_DROP_TABLES)
+
+
 def ensure_mysql_schema(config: MySQLConfig) -> None:
     ensure_mysql_database(config)
     sql_text = V2_SCHEMA_PATH.read_text(encoding="utf-8")
@@ -1938,6 +844,8 @@ def ensure_mysql_schema(config: MySQLConfig) -> None:
         with conn.cursor() as cur:
             for statement in statements:
                 cur.execute(statement)
+            ensure_ai_model_profile_columns(cur)
+            ensure_ai_enrichment_queue_columns(cur)
         conn.commit()
 
 
@@ -1946,14 +854,14 @@ def reset_mysql_tables(config: MySQLConfig) -> None:
     with mysql_connection(config) as conn:
         with conn.cursor() as cur:
             cur.execute("SET FOREIGN_KEY_CHECKS=0")
-            for table in V2_DROP_TABLES:
+            for table in RESET_DROP_TABLES:
                 cur.execute(f"DROP TABLE IF EXISTS `{table}`")
             cur.execute("SET FOREIGN_KEY_CHECKS=1")
         conn.commit()
     ensure_mysql_schema(config)
 
 
-def _get_item_id(cur, source_item_id: str, *, source_platform: str = "jd", required: bool = True) -> int | None:
+def _get_item_id(cur, source_item_id: str, *, source_platform: str = "jd", required: bool = True) -> Optional[int]:
     cur.execute(
         "SELECT item_id FROM auction_items WHERE source_platform=%s AND source_item_id=%s",
         (source_platform, str(source_item_id)),
@@ -1969,11 +877,11 @@ def _get_item_id(cur, source_item_id: str, *, source_platform: str = "jd", requi
 def _ensure_item_stub(
     cur,
     paimai_id: str,
-    batch_id: str | None = None,
-    source_url: str | None = None,
+    batch_id: Optional[str] = None,
+    source_url: Optional[str] = None,
     *,
     source_platform: str = "jd",
-    source_site_name: str | None = None,
+    source_site_name: Optional[str] = None,
 ) -> int:
     source_item_id = str(paimai_id)
     row = {
@@ -1996,12 +904,12 @@ def _insert_payload(
     cur,
     *,
     item_id: int,
-    batch_id: str | None,
+    batch_id: Optional[str],
     payload_type: str,
     value: Any,
-    source_url: str | None,
+    source_url: Optional[str],
     source_platform: str = "jd",
-) -> int | None:
+) -> Optional[int]:
     if value is None:
         return None
     is_json_payload = payload_type.endswith("_json")
@@ -2130,15 +1038,15 @@ class MySQLJDScraperDatabase:
         batch_id: str,
         source_url: str,
         source_platform: str = "jd",
-        source_item_id: str | None = None,
-        source_site_name: str | None = None,
+        source_item_id: Optional[str] = None,
+        source_site_name: Optional[str] = None,
         list_json: Any,
         detail_json: Any,
         realtime_json: Any,
-        description_html: str | None,
+        description_html: Optional[str],
         product_basic_json: Any = None,
-        notice_html: str | None = None,
-        announcement_html: str | None = None,
+        notice_html: Optional[str] = None,
+        announcement_html: Optional[str] = None,
         attachments_json: Any = None,
         vendor_json: Any = None,
     ) -> None:
@@ -2168,7 +1076,7 @@ class MySQLJDScraperDatabase:
                     f"DELETE FROM raw_payloads WHERE item_id=%s AND batch_id=%s AND payload_type IN ({qmarks(len(payload_types))})",
                     [item_id, batch_id, *payload_types],
                 )
-                payload_id_by_type: dict[str, int | None] = {}
+                payload_id_by_type: dict[str, Optional[int]] = {}
                 for payload_type, value in (
                     ("list_json", list_json),
                     ("detail_json", detail_json),
@@ -2241,6 +1149,8 @@ class MySQLJDScraperDatabase:
         )
         with mysql_connection(self.config) as conn:
             with conn.cursor() as cur:
+                # 采集队列: 落库前查询旧记录, 用于判定 success/updated/unchanged
+                prev_record = self._fetch_prev_common_for_queue(cur, row.get("source_platform"), row.get("source_item_id"))
                 _ensure_item_stub(
                     cur,
                     row["source_item_id"],
@@ -2261,7 +1171,308 @@ class MySQLJDScraperDatabase:
                     values=full_values,
                     field_results=field_results,
                 )
+                # 采集队列: 写入标级采集结果 (失败不影响主采集流程)
+                try:
+                    self._record_crawl_queue_item(cur, batch_id, row, item_id, prev_record)
+                except Exception:
+                    pass
             conn.commit()
+
+    # ── 增量采集辅助 ──
+    def query_existing_source_item_ids(self, source_platform: str) -> set[str]:
+        """返回该平台已写入主表(auction_items)的 source_item_id 集合, 供增量采集过滤。"""
+        ids: set[str] = set()
+        try:
+            with mysql_connection(self.config) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT DISTINCT source_item_id FROM auction_items WHERE source_platform=%s",
+                        (source_platform,),
+                    )
+                    for row in cur.fetchall():
+                        sid = row.get("source_item_id") if isinstance(row, dict) else row[0]
+                        if sid:
+                            ids.add(compact_text(sid))
+        except Exception:
+            pass
+        return ids
+
+    def query_list_fingerprints(self, source_platform: str) -> dict[str, str]:
+        """返回该平台已知列表指纹: {source_item_id: fingerprint}。"""
+        result: dict[str, str] = {}
+        try:
+            with mysql_connection(self.config) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT source_item_id, fingerprint FROM crawl_list_fingerprints "
+                        "WHERE source_platform=%s",
+                        (source_platform,),
+                    )
+                    for row in cur.fetchall():
+                        if isinstance(row, dict):
+                            sid, fp = row.get("source_item_id"), row.get("fingerprint")
+                        else:
+                            sid, fp = row[0], row[1]
+                        if sid:
+                            result[compact_text(sid)] = compact_text(fp)
+        except Exception:
+            pass
+        return result
+
+    def upsert_list_fingerprints(self, rows: list[dict[str, Any]]) -> None:
+        """批量写入/更新列表指纹。rows: [{source_platform, source_item_id, fingerprint, updated_at}]"""
+        if not rows:
+            return
+        normalized = [
+            {
+                "source_platform": compact_text(r.get("source_platform")),
+                "source_item_id": compact_text(r.get("source_item_id")),
+                "fingerprint": compact_text(r.get("fingerprint")),
+                "updated_at": r.get("updated_at") or now_text(),
+            }
+            for r in rows
+            if compact_text(r.get("source_item_id"))
+        ]
+        if not normalized:
+            return
+        try:
+            with mysql_connection(self.config) as conn:
+                with conn.cursor() as cur:
+                    upsert_rows(cur, "crawl_list_fingerprints", normalized,
+                                mysql_column_types(cur, "crawl_list_fingerprints"))
+                conn.commit()
+        except Exception:
+            pass
+
+    # ── 采集队列(标级) 辅助与查询 ──
+    _CRAWL_QUEUE_COMPARE_KEYS = (
+        "project_name", "start_price_display", "final_price_display",
+        "project_status", "assessment_price_display", "auction_stage",
+        "asset_group", "disposal_party", "disposal_agency",
+        "asset_location", "contact_info",
+    )
+
+    def _fetch_prev_common_for_queue(self, cur, source_platform, source_item_id):
+        if not source_item_id:
+            return None
+        try:
+            cur.execute(
+                """
+                SELECT project_name, start_price_display, final_price_display,
+                       project_status, assessment_price_display, auction_stage,
+                       asset_group, disposal_party, disposal_agency,
+                       asset_location, contact_info, batch_id
+                FROM auction_items
+                WHERE source_platform=%s AND source_item_id=%s
+                """,
+                (source_platform, source_item_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            if isinstance(row, dict):
+                return row
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _queue_source_url(source_platform: Optional[str], source_item_id: Optional[str], source_url: Optional[str] = None) -> str:
+        source_url = compact_text(source_url)
+        if source_url:
+            return source_url
+        if source_platform == "jd" and source_item_id:
+            return f"https://paimai.jd.com/{source_item_id}"
+        return ""
+
+    def _record_crawl_queue_item(self, cur, batch_id, row, item_id, prev):
+        source_platform = row.get("source_platform")
+        source_item_id = row.get("source_item_id")
+        if prev is None:
+            status = "success"
+            changed = None
+            prev_batch = None
+        else:
+            changed = []
+            for key in self._CRAWL_QUEUE_COMPARE_KEYS:
+                old_val = ("" if prev.get(key) is None else str(prev.get(key))).strip()
+                new_val = ("" if row.get(key) is None else str(row.get(key))).strip()
+                if old_val != new_val:
+                    changed.append({"field": key, "from": old_val, "to": new_val})
+            status = "updated" if changed else "unchanged"
+            prev_batch = prev.get("batch_id")
+        cur.execute(
+            """
+            INSERT INTO crawl_queue
+              (batch_id, source_platform, source_item_id, source_url, item_id,
+               queue_status, last_error, discovered_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+            ON DUPLICATE KEY UPDATE
+              source_url=VALUES(source_url),
+              item_id=VALUES(item_id),
+              queue_status=VALUES(queue_status),
+              last_error=VALUES(last_error),
+              updated_at=NOW()
+            """,
+            (
+                batch_id,
+                source_platform,
+                source_item_id,
+                self._queue_source_url(source_platform, source_item_id, row.get("source_url")),
+                item_id,
+                status,
+                None,
+            ),
+        )
+
+    def save_checkpoint(self, *, source_platform: str, category_key: str = "default",
+                        current_page: int = 1, total_items_seen: int = 0,
+                        last_item_id: Optional[str] = None) -> None:
+        """保存采集断点"""
+        with mysql_connection(self.config) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO crawl_checkpoints
+                        (source_platform, category_key, current_page, total_items_seen, last_item_id, started_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                    ON DUPLICATE KEY UPDATE
+                        current_page = VALUES(current_page),
+                        total_items_seen = VALUES(total_items_seen),
+                        last_item_id = COALESCE(VALUES(last_item_id), last_item_id),
+                        updated_at = NOW()
+                    """,
+                    (source_platform, category_key, current_page, total_items_seen, last_item_id),
+                )
+            conn.commit()
+
+    def load_checkpoint(self, *, source_platform: str, category_key: str = "default") -> dict[str, Any] | None:
+        """加载采集断点，返回 None 表示没有断点"""
+        with mysql_connection(self.config) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM crawl_checkpoints WHERE source_platform=%s AND category_key=%s",
+                    (source_platform, category_key),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                return dict(zip(cols, row))
+
+    def clear_checkpoint(self, *, source_platform: str, category_key: str = "default") -> None:
+        """清除采集断点（全量采集完成后）"""
+        with mysql_connection(self.config) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM crawl_checkpoints WHERE source_platform=%s AND category_key=%s",
+                    (source_platform, category_key),
+                )
+            conn.commit()
+
+    def write_crawl_queue_item(self, *, batch_id, source_platform, source_item_id,
+                               item_id=None, project_name=None, asset_group=None,
+                               asset_group_label=None, status, error_message=None,
+                               prev_batch_id=None, changed_fields_json=None,
+                               source_url=None):
+        """Record one crawl queue item in the formal V2 crawl_queue table."""
+        with mysql_connection(self.config) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO crawl_queue
+                      (batch_id, source_platform, source_item_id, source_url, item_id,
+                       queue_status, last_error, discovered_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    ON DUPLICATE KEY UPDATE
+                      source_url=VALUES(source_url),
+                      item_id=VALUES(item_id),
+                      queue_status=VALUES(queue_status),
+                      last_error=VALUES(last_error),
+                      updated_at=NOW()
+                    """,
+                    (
+                        batch_id,
+                        source_platform,
+                        source_item_id,
+                        self._queue_source_url(source_platform, source_item_id, source_url),
+                        item_id,
+                        status,
+                        error_message,
+                    ),
+                )
+            conn.commit()
+
+    def get_crawl_queue_stats(self, batch_id=None):
+        with mysql_connection(self.config) as conn:
+            with conn.cursor() as cur:
+                where = ""
+                params: list[Any] = []
+                if batch_id:
+                    where = "WHERE batch_id=%s"
+                    params.append(batch_id)
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN queue_status='success' THEN 1 ELSE 0 END),0) AS success,
+                        COALESCE(SUM(CASE WHEN queue_status='failed' THEN 1 ELSE 0 END),0) AS failed,
+                        COALESCE(SUM(CASE WHEN queue_status='updated' THEN 1 ELSE 0 END),0) AS updated,
+                        COALESCE(SUM(CASE WHEN queue_status='unchanged' THEN 1 ELSE 0 END),0) AS unchanged,
+                        COALESCE(SUM(CASE WHEN queue_status='skipped' THEN 1 ELSE 0 END),0) AS skipped,
+                        COUNT(*) AS total
+                    FROM crawl_queue
+                    """ + (" " + where if where else ""),
+                    params,
+                )
+                row = cur.fetchone()
+                if isinstance(row, dict):
+                    return row
+                cols = [d[0] for d in cur.description]
+                return dict(zip(cols, row)) if row else {
+                    "success": 0, "failed": 0, "updated": 0, "unchanged": 0, "skipped": 0, "total": 0
+                }
+
+    def list_crawl_queue_items(self, batch_id=None, status: str = "", page: int = 1, size: int = 20):
+        page = max(1, int(page or 1))
+        size = max(1, min(200, int(size or 20)))
+        offset = (page - 1) * size
+        with mysql_connection(self.config) as conn:
+            with conn.cursor() as cur:
+                where = []
+                params: list[Any] = []
+                if batch_id:
+                    where.append("q.batch_id=%s")
+                    params.append(batch_id)
+                if status:
+                    where.append("q.queue_status=%s")
+                    params.append(status)
+                where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+                cur.execute(f"SELECT COUNT(*) AS cnt FROM crawl_queue q {where_clause}", params)
+                count_row = cur.fetchone()
+                if isinstance(count_row, dict):
+                    total = int(count_row.get("cnt") or 0)
+                else:
+                    total = int(count_row[0] if count_row else 0)
+                cur.execute(
+                    f"""
+                    SELECT q.*
+                    FROM crawl_queue q
+                    {where_clause}
+                    ORDER BY q.queue_id DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    params + [size, offset],
+                )
+                fetched = cur.fetchall() or []
+                if not fetched:
+                    rows = []
+                elif isinstance(fetched[0], dict):
+                    rows = list(fetched)
+                else:
+                    cols = [d[0] for d in cur.description]
+                    rows = [dict(zip(cols, r)) for r in fetched]
+        return {"total": total, "page": page, "size": size, "items": rows}
 
     def upsert_special_item(
         self,
@@ -2306,9 +1517,9 @@ class MySQLJDScraperDatabase:
                             "detail_index": index,
                             "sequence_no": _blank_to_none(detail.get("sequence_no")),
                             "debtor_name": _blank_to_none(detail.get("debtor_name") or detail.get("debtor_or_asset")),
-                            "principal_balance_amount": _money_decimal(detail.get("principal_balance")),
-                            "interest_balance_amount": _money_decimal(detail.get("interest_balance")),
-                            "claim_total_amount": _money_decimal(detail.get("claim_total")),
+                            "principal_balance_amount": _debt_detail_money_decimal(detail.get("principal_balance"), detail),
+                            "interest_balance_amount": _debt_detail_money_decimal(detail.get("interest_balance"), detail),
+                            "claim_total_amount": _debt_detail_money_decimal(detail.get("claim_total"), detail),
                             "benchmark_date": date_to_db(detail.get("benchmark_date")),
                             "collateral": _blank_to_none(detail.get("collateral")),
                             "guarantor": _blank_to_none(detail.get("guarantor") or detail.get("guarantor_or_related_party")),
@@ -2381,7 +1592,7 @@ class MySQLJDScraperDatabase:
         *,
         paimai_id: str,
         source_platform: str = "jd",
-        source_item_id: str | None = None,
+        source_item_id: Optional[str] = None,
         asset_group: str,
         context: dict[str, Any],
         task_type: str = "field_enrichment",
@@ -2412,6 +1623,16 @@ class MySQLJDScraperDatabase:
                     "result_json": None,
                 }
                 upsert_rows(cur, "ai_enrichment_queue", [row], mysql_column_types(cur, "ai_enrichment_queue"))
+                # AI 入队后，将采集队列状态改为 pending_ai，表示主采完成、等待 AI。
+                cur.execute(
+                    """
+                    UPDATE crawl_queue
+                    SET queue_status='pending_ai', updated_at=NOW()
+                    WHERE source_platform=%s AND source_item_id=%s
+                      AND queue_status IN ('success', 'updated', 'unchanged')
+                    """,
+                    (source_platform, item_ref),
+                )
             conn.commit()
 
     def fetch_ai_enrichment_tasks(
@@ -2420,41 +1641,122 @@ class MySQLJDScraperDatabase:
         limit: int = 20,
         worker_id: str = "ai-worker",
         stale_minutes: int = 30,
+        task_types: Optional[list[str]] = None,
     ) -> list[dict[str, Any]]:
         limit = max(1, int(limit or 1))
+        normalized_task_types: list[str] = []
+        for item in task_types or []:
+            task_type = compact_text(item)
+            if task_type and task_type not in normalized_task_types:
+                normalized_task_types.append(task_type)
+
+        task_filter = ""
+        filter_params: list[Any] = []
+        if normalized_task_types:
+            clauses: list[str] = []
+
+            def add_clause(sql: str, *values: Any) -> None:
+                clauses.append(sql)
+                filter_params.extend(values)
+
+            for task_type in normalized_task_types:
+                add_clause("task_type=%s", task_type)
+                if task_type == "debt":
+                    add_clause("(task_type='field_enrichment' AND asset_group='debt')")
+                elif task_type == "vision":
+                    add_clause("(task_type IN ('vision','ip_image_details') OR (task_type='field_enrichment' AND asset_group='ip'))")
+                elif task_type == "attachment":
+                    add_clause("task_type IN ('attachment','attachment_parse')")
+                elif task_type == "text":
+                    add_clause("(task_type='field_enrichment' AND COALESCE(asset_group,'') NOT IN ('debt','ip'))")
+                elif task_type == "long_text":
+                    add_clause("task_type='long_text'")
+            if clauses:
+                task_filter = " AND (" + " OR ".join(clauses) + ")"
+
         with mysql_connection(self.config) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM ai_enrichment_queue
-                    WHERE (
-                        queue_status='pending'
-                        OR (queue_status='failed' AND retry_count < max_retries)
-                        OR (
-                            queue_status='running'
-                            AND locked_at IS NOT NULL
-                            AND locked_at < DATE_SUB(NOW(), INTERVAL %s MINUTE)
+            try:
+                conn.begin()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT *
+                        FROM ai_enrichment_queue
+                        WHERE (
+                            queue_status='pending'
+                            OR (queue_status='failed' AND retry_count < max_retries)
+                            OR (
+                                queue_status IN ('running', 'parsing')
+                                AND locked_at IS NOT NULL
+                                AND locked_at < DATE_SUB(NOW(), INTERVAL %s MINUTE)
+                            )
                         )
+                        {task_filter}
+                        ORDER BY priority ASC, ai_task_id ASC
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                        """,
+                        [stale_minutes, *filter_params, limit],
                     )
-                    ORDER BY priority ASC, ai_task_id ASC
-                    LIMIT %s
-                    """,
-                    (stale_minutes, limit),
-                )
-                rows = list(cur.fetchall())
-                if rows:
+                    rows = list(cur.fetchall())
+                    if not rows:
+                        conn.commit()
+                        return []
                     ids = [int(row["ai_task_id"]) for row in rows]
                     cur.execute(
                         f"""
                         UPDATE ai_enrichment_queue
-                        SET queue_status='running', locked_by=%s, locked_at=NOW(), updated_at=NOW()
+                        SET queue_status='running',
+                            locked_by=%s,
+                            locked_at=NOW(),
+                            running_profile_name=NULL,
+                            running_provider=NULL,
+                            running_model_name=NULL,
+                            updated_at=NOW()
                         WHERE ai_task_id IN ({qmarks(len(ids))})
                         """,
                         [worker_id, *ids],
                     )
-            conn.commit()
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         return rows
+
+    def mark_ai_enrichment_task_parsing(
+        self,
+        ai_task_id: int,
+        *,
+        worker_id: str = "",
+        profile_name: str = "",
+        provider: str = "",
+        model_name: str = "",
+    ) -> bool:
+        """Move a claimed AI task from running to parsing before the model call.
+
+        Returns False if the task was paused or otherwise changed after claim.
+        """
+        with mysql_connection(self.config) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE ai_enrichment_queue
+                    SET queue_status='parsing',
+                        locked_by=COALESCE(NULLIF(%s, ''), locked_by),
+                        locked_at=NOW(),
+                        running_profile_name=NULLIF(%s, ''),
+                        running_provider=NULLIF(%s, ''),
+                        running_model_name=NULLIF(%s, ''),
+                        last_error=NULL,
+                        updated_at=NOW()
+                    WHERE ai_task_id=%s
+                      AND queue_status='running'
+                    """,
+                    (worker_id, profile_name, provider, model_name, ai_task_id),
+                )
+                affected = cur.rowcount
+            conn.commit()
+        return affected == 1
 
     def mark_ai_enrichment_task_success(self, ai_task_id: int, result_json: Any) -> None:
         with mysql_connection(self.config) as conn:
@@ -2462,10 +1764,28 @@ class MySQLJDScraperDatabase:
                 cur.execute(
                     """
                     UPDATE ai_enrichment_queue
-                    SET queue_status='success', result_json=%s, last_error=NULL, updated_at=NOW()
+                    SET queue_status='success',
+                        result_json=%s,
+                        locked_by=NULL,
+                        locked_at=NULL,
+                        last_error=NULL,
+                        updated_at=NOW()
                     WHERE ai_task_id=%s
                     """,
                     (safe_json_dumps(result_json), ai_task_id),
+                )
+                # AI 完成后，更新采集队列状态。
+                cur.execute(
+                    """
+                    UPDATE crawl_queue cq
+                    JOIN ai_enrichment_queue aq ON aq.source_platform = cq.source_platform
+                      AND aq.source_item_id = cq.source_item_id
+                    SET cq.queue_status = 'success',
+                        cq.updated_at = NOW()
+                    WHERE aq.ai_task_id = %s
+                      AND cq.queue_status = 'pending_ai'
+                    """,
+                    (ai_task_id,),
                 )
             conn.commit()
 
@@ -2479,12 +1799,31 @@ class MySQLJDScraperDatabase:
                         retry_count=retry_count + 1,
                         locked_by=NULL,
                         locked_at=NULL,
+                        running_profile_name=NULL,
+                        running_provider=NULL,
+                        running_model_name=NULL,
                         last_error=%s,
                         updated_at=NOW()
                     WHERE ai_task_id=%s
                     """,
                     (compact_text(error)[:4000], ai_task_id),
                 )
+                # 如果 AI 已耗尽重试次数（永久失败），将 crawl_queue 从 pending_ai 恢复为 success
+                if mysql_table_exists(cur, "crawl_queue"):
+                    cur.execute(
+                        """
+                        UPDATE crawl_queue cq
+                        JOIN ai_enrichment_queue aq ON aq.source_platform = cq.source_platform
+                          AND aq.source_item_id = cq.source_item_id
+                        SET cq.queue_status = 'success',
+                            cq.last_error = %s,
+                            cq.updated_at = NOW()
+                        WHERE aq.ai_task_id = %s
+                          AND cq.queue_status = 'pending_ai'
+                          AND aq.retry_count >= aq.max_retries
+                        """,
+                        (compact_text(error)[:2000], ai_task_id),
+                    )
             conn.commit()
 
     def apply_ai_enrichment_results(
@@ -2613,7 +1952,7 @@ class MySQLJDScraperDatabase:
                 row["final_price_amount"] = _money_decimal(start_display)
                 row["price_basis"] = "start_price_fallback_after_ai"
         final_display = _blank_to_none(common_values.get("final_price_raw"))
-        if final_display:
+        if final_display and _valid_price_display(final_display):
             row["final_price_display"] = final_display
             row["final_price_amount"] = _money_decimal(final_display)
             row["price_basis"] = "ai_extracted_effective_price"
@@ -2859,7 +2198,7 @@ def _raw_payload_map(cur, item_id: int) -> dict[str, Any]:
     return raw
 
 
-def parse_source_item_ref(value: Any) -> tuple[str | None, str]:
+def parse_source_item_ref(value: Any) -> tuple[Optional[str], str]:
     text = str(value or "").strip()
     if ":" in text:
         platform, source_item_id = text.split(":", 1)
@@ -2877,6 +2216,9 @@ def get_items_mysql(config: MySQLConfig, filters: dict[str, str] | None = None) 
     if filters.get("asset_group"):
         clauses.append("c.asset_group = %s")
         params.append(filters["asset_group"])
+    if filters.get("source_platform"):
+        clauses.append("c.source_platform = %s")
+        params.append(filters["source_platform"])
     if filters.get("project_status"):
         clauses.append("c.project_status = %s")
         params.append(filters["project_status"])
@@ -2907,6 +2249,7 @@ def get_items_mysql(config: MySQLConfig, filters: dict[str, str] | None = None) 
                 SELECT
                   CONCAT(c.source_platform, ':', c.source_item_id) AS paimai_id,
                   c.source_platform,
+                  c.source_site_name,
                   c.source_item_id,
                   c.asset_group,
                   c.asset_group_label,
@@ -2936,11 +2279,23 @@ def get_items_mysql(config: MySQLConfig, filters: dict[str, str] | None = None) 
             )
             asset_groups = cur.fetchall()
             cur.execute(
+                """
+                SELECT
+                  source_platform,
+                  COALESCE(NULLIF(MAX(source_site_name), ''), source_platform) AS source_site_name,
+                  COUNT(*) AS count
+                FROM auction_items
+                GROUP BY source_platform
+                ORDER BY source_platform
+                """
+            )
+            source_platforms = cur.fetchall()
+            cur.execute(
                 "SELECT DISTINCT project_status FROM auction_items "
                 "WHERE project_status IS NOT NULL AND project_status!='' ORDER BY project_status"
             )
             statuses = [row["project_status"] for row in cur.fetchall()]
-    return {"items": items, "asset_groups": asset_groups, "statuses": statuses}
+    return {"items": items, "asset_groups": asset_groups, "source_platforms": source_platforms, "statuses": statuses}
 
 
 def get_item_detail_mysql(config: MySQLConfig, paimai_id: str) -> dict[str, Any]:
@@ -3103,22 +2458,29 @@ def get_item_detail_mysql(config: MySQLConfig, paimai_id: str) -> dict[str, Any]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="同步京东拍卖 SQLite 数据到 MySQL")
-    parser.add_argument("--sqlite", type=Path, default=Path("outputs") / "v2_multi_preview" / "jd_auction.sqlite")
+    parser = argparse.ArgumentParser(description="初始化或重建拍卖采集 V2 MySQL 正式表")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=3306)
-    parser.add_argument("--user", default="")
-    parser.add_argument("--password", default="")
+    parser.add_argument("--user", default="root")
+    parser.add_argument("--password", default="root")
     parser.add_argument("--database", default="auction_data")
-    parser.add_argument("--no-clean-assessment", action="store_true", help="不清理明显误提取的评估价")
+    parser.add_argument("--reset", action="store_true", help="删除并重建 V2 MySQL 正式表，同时清理已废弃旧表")
+    parser.add_argument("--confirm-reset", action="store_true", help="与 --reset 同时使用，确认执行删除重建")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     config = MySQLConfig(args.host, args.port, args.user, args.password, args.database)
-    imported = import_sqlite_to_mysql(args.sqlite, config, clean_assessment=not args.no_clean_assessment)
-    print(json.dumps(imported, ensure_ascii=False, indent=2))
+    if args.reset:
+        if not args.confirm_reset:
+            raise SystemExit("--reset 会删除并重建 V2 MySQL 表，请同时传入 --confirm-reset")
+        reset_mysql_tables(config)
+        action = "reset"
+    else:
+        ensure_mysql_schema(config)
+        action = "ensure"
+    print(json.dumps({"action": action, "database": config.database, "tables": mysql_table_names()}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

@@ -8,10 +8,8 @@
 - 多来源冲突检测 (Phase 2)
 - AI 辅助提取兜底 (Phase 2)
 """
-from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import hashlib
 import html
@@ -19,10 +17,7 @@ import io
 import json
 import os
 import re
-import sqlite3
 import time
-import uuid
-from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
@@ -44,7 +39,12 @@ from jd.logger import get_logger
 # ===== Phase 2 集成：数据处理引擎 =====
 from jd.field_standardizer import FieldStandardizer
 from jd.conflict_detector import ConflictDetector
-from jd.ai_extractor import AIExtractionContext, create_ai_extractor, FIELD_DEFINITIONS
+from jd.ai_extractor import (
+    AIExtractionContext,
+    create_ai_extractor,
+    FIELD_DEFINITIONS,
+    AI_DETAIL_TEXT_LIMIT,
+)
 from jd.ai_config import load_mysql_ai_profile, resolve_ai_config
 
 # 初始化全局日志
@@ -183,6 +183,10 @@ def init_ai_extractor(
             circuit_breaker_cooldown_seconds=cfg.ai.circuit_breaker_cooldown_seconds,
         )
     )
+    if ai_extractor is not None:
+        setattr(ai_extractor, "profile_name", resolved.profile_name)
+        setattr(ai_extractor, "provider", resolved.provider)
+        setattr(ai_extractor, "model_name", resolved.model_name)
     logger.info(
         "ai_extractor_enabled",
         "AI extractor enabled",
@@ -534,12 +538,12 @@ def to_int(value: Any) -> Optional[int]:
 
 
 MONEY_WITH_UNIT_RE = re.compile(
-    r"(?:[¥￥]\s*)?-?\d[\d,]*(?:\.\d+)?\s*(?:万亿|亿元|万元|人民币元|人民币|亿|万|元|yuan|Yuan|YUAN|RMB|CNY)?"
+    r"(?:[¥￥]\s*)?-?\d[\d,]*(?:\.\d+)?\s*(?:(?:万亿|亿元)|(?:万元|人民币元)|(?:人民币|亿)|(?:万|元)|(?:yuan|Yuan)|(?:YUAN|RMB)|CNY)?"
 )
 LABELED_MONEY_RE = re.compile(
-    r"(?:评估价(?:格|值)?|评估价值|市场价(?:格)?|起拍价|转让底价|债权合计|债权总额|"
-    r"本金余额|本金|利息余额|利息|欠息|费用|金额)\s*[:：]?\s*"
-    r"(?P<amount>[¥￥]?\s*-?\d[\d,]*(?:\.\d+)?\s*(?:万亿|亿元|万元|人民币元|人民币|亿|万|元|yuan|Yuan|YUAN|RMB|CNY)?)"
+    r"(?:评估价(?:(?:格|值))?|(?:评估价值|市场价)(?:格)?|(?:起拍价|转让底价)|(?:债权合计|债权总额)|"
+    r"(?:本金余额|本金)|(?:利息余额|利息)|(?:欠息|费用)|金额)\s*[:：]?\s*"
+    r"(?P<amount>[¥￥]?\s*-?\d[\d,]*(?:\.\d+)?\s*(?:(?:万亿|亿元)|(?:万元|人民币元)|(?:人民币|亿)|(?:万|元)|(?:yuan|Yuan)|(?:YUAN|RMB)|CNY)?)"
 )
 
 
@@ -1168,17 +1172,17 @@ def is_zero_like(value: Any) -> bool:
 ASSESSMENT_CONTEXT_TERMS = ("评估", "市场价", "市场价格", "market price", "appraisal", "valuation")
 ASSESSMENT_DATE_TERMS = ("评估基准日", "评估日期", "评估时间", "appraisal date", "valuation date")
 ASSESSMENT_RATIO_RE = re.compile(
-    r"(?:评估(?:价|价格|价值)?|市场(?:价|价格)|market\s+price|appraisal|valuation)"
-    r"\s*[:：]?\s*[¥￥]?\s*\d[\d,]*(?:\.\d+)?\s*(?:倍|折|成|次|%|％)",
+    r"(?:评估(?:(?:价|价格)|价值)?|市场(?:(?:价|价格))|market\s+(?:price|appraisal)|valuation)"
+    r"\s*[:：]?\s*[¥￥]?\s*\d[\d,]*(?:\.\d+)?\s*(?:(?:倍|折)|(?:成|次)|%|％)",
     re.IGNORECASE,
 )
 ASSESSMENT_LABELED_AMOUNT_RE = re.compile(
-    r"(?:评估(?:价|价格|价值)?|市场(?:价|价格)|market\s+price|appraisal|valuation)"
-    r"\s*[:：]?\s*[¥￥]?\s*\d[\d,]*(?:\.\d+)?\s*(?:亿元|万元|元|万|亿|yuan|rmb|cny)?"
-    r"(?!\s*(?:倍|折|成|次|%|％))",
+    r"(?:评估(?:(?:价|价格)|价值)?|市场(?:(?:价|价格))|market\s+(?:price|appraisal)|valuation)"
+    r"\s*[:：]?\s*[¥￥]?\s*\d[\d,]*(?:\.\d+)?\s*(?:(?:亿元|万元)|(?:元|万)|(?:亿|yuan)|(?:rmb|cny))?"
+    r"(?!\s*(?:(?:倍|折)|(?:成|次)|%|％))",
     re.IGNORECASE,
 )
-ASSESSMENT_MONEY_MARKER_RE = re.compile(r"[¥￥元万亿]|人民币|yuan|rmb|cny", re.IGNORECASE)
+ASSESSMENT_MONEY_MARKER_RE = re.compile(r"[¥￥元万亿]|(?:人民币|yuan)|(?:rmb|cny)", re.IGNORECASE)
 
 
 def has_assessment_context(text: Any) -> bool:
@@ -1260,7 +1264,6 @@ def ai_field_tuple(field: FieldDef) -> Tuple[str, str, str]:
     )
 
 
-AI_DETAIL_TEXT_LIMIT = 30000
 AI_NOTICE_TEXT_LIMIT = 30000
 AI_TABLE_ROWS_LIMIT = 300
 AI_TARGET_TABLE_ROWS_LIMIT = 20
@@ -1274,7 +1277,7 @@ def extract_activity_time_hints(*texts: Any, max_hints: int = 12) -> List[str]:
         hint = compact_text(value) or ""
         if not hint or hint in hints:
             return
-        if not re.search(r"\d{4}|[一二三四五六七八九十]|\d{1,2}\s*(?:时|点)", hint):
+        if not re.search(r"\d{4}|[一二三四五六七八九十]|\d{1,2}\s*(?:(?:时|点))", hint):
             return
         misleading = ("公告发布日期", "发布时间", "展示看样期", "看样时间", "资质审核截止日", "资质审核截止时间")
         if any(word in hint for word in misleading) and not any(word in hint for word in ("竞价", "拍卖", "变卖")):
@@ -1282,12 +1285,12 @@ def extract_activity_time_hints(*texts: Any, max_hints: int = 12) -> List[str]:
         hints.append(hint[:500])
 
     time_patterns = (
-        r"[^。；;\n]{0,100}(?:竞价时间|拍卖时间|拍卖竞价时间|报名时间|竞买时间|变卖时间|将于|定于)"
-        r"[^。；;\n]{0,260}(?:止|结束|截止)[^。；;\n]{0,80}",
+        r"[^。；;\n]{0,100}(?:(?:竞价时间|拍卖时间)|(?:拍卖竞价时间|报名时间)|(?:竞买时间|变卖时间)|(?:将于|定于))"
+        r"[^。；;\n]{0,260}(?:(?:止|结束)|截止)[^。；;\n]{0,80}",
         r"[^。；;\n]{0,120}\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]"
-        r"[^。；;\n]{0,220}(?:起|至|到)[^。；;\n]{0,220}(?:止|结束|截止)[^。；;\n]{0,80}",
+        r"[^。；;\n]{0,220}(?:(?:起|至)|到)[^。；;\n]{0,220}(?:(?:止|结束)|截止)[^。；;\n]{0,80}",
         r"[^。；;\n]{0,120}\d{4}[-/]\d{1,2}[-/]\d{1,2}"
-        r"[^。；;\n]{0,220}(?:起|至|到|-|—|~|～)[^。；;\n]{0,220}(?:止|结束|截止)[^。；;\n]{0,80}",
+        r"[^。；;\n]{0,220}(?:(?:起|至)|到|-|—|~|～)[^。；;\n]{0,220}(?:(?:止|结束)|截止)[^。；;\n]{0,80}",
     )
     for text in texts:
         clean = compact_text(text) or ""
@@ -1319,11 +1322,11 @@ def project_table_match_tokens(project_name: Any) -> List[str]:
 
     add(normalized)
     for match in re.finditer(
-        r"[A-Za-z]?\d+[A-Za-z]?\s*(?:号楼|幢|栋|座|层|室|房|铺|商铺|车位|摩托车位|号)?(?:\s*(?:摩托车位|车位))?",
+        r"[A-Za-z]?\d+[A-Za-z]?\s*(?:(?:号楼|幢)|(?:栋|座)|(?:层|室)|(?:房|铺)|(?:商铺|车位)|(?:摩托车位|号))?(?:\s*(?:(?:摩托车位|车位)))?",
         text,
     ):
         add(match.group(0))
-    for match in re.finditer(r"\d+\s*号\s*(?:摩托车位|车位|房|室|铺|商铺)?", text):
+    for match in re.finditer(r"\d+\s*号\s*(?:(?:摩托车位|车位)|(?:房|室)|(?:铺|商铺))?", text):
         add(match.group(0))
     return [token for token in tokens if len(token) >= 2]
 
@@ -1568,42 +1571,14 @@ def prefetch_combined_ai_results(
     )
 
 
-def normalize_chinese_hour(hour: str | None, meridiem: str | None = None) -> Optional[str]:
-    if not hour:
-        return None
-    value = int(hour)
-    marker = meridiem or ""
-    if marker in {"下午", "晚上", "傍晚"} and 1 <= value < 12:
-        value += 12
-    elif marker == "中午" and value < 12:
-        value = 12
-    elif marker == "凌晨" and value == 12:
-        value = 0
-    return str(value)
-
-
-def parse_chinese_datetime_text(text: str) -> str | None:
+def parse_chinese_datetime_text(text: str) -> Optional[str]:
     matches = _chinese_datetime_matches(text)
     if not matches or not matches[0][3]:
         return None
     return _format_chinese_match_datetime(matches[0])
 
 
-def _chinese_datetime_matches(text: str) -> List[Tuple[str, str, str, Optional[str], Optional[str]]]:
-    pattern = re.compile(
-        r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日\s*"
-        r"(?:(上午|下午|晚上|傍晚|中午|凌晨|早上)?\s*"
-        r"(\d{1,2})(?:(?:[:：]\s*(\d{1,2}))|(?:\s*[时点](?:\s*(\d{1,2})分?)?)))?"
-    )
-    matches: List[Tuple[str, str, str, Optional[str], Optional[str]]] = []
-    for match in pattern.finditer(text):
-        year, month, day, meridiem, hour, minute_a, minute_b = match.groups()
-        minute = minute_a or minute_b
-        matches.append((year, month, day, normalize_chinese_hour(hour, meridiem), minute))
-    return matches
-
-
-def _native_chinese_hour(hour: str | None, meridiem: str | None = None) -> Optional[str]:
+def _native_chinese_hour(hour: Optional[str], meridiem: Optional[str] = None) -> Optional[str]:
     if not hour:
         return None
     value = int(hour)
@@ -1620,7 +1595,7 @@ def _native_chinese_hour(hour: str | None, meridiem: str | None = None) -> Optio
 def _chinese_datetime_matches(text: str) -> List[Tuple[str, str, str, Optional[str], Optional[str]]]:
     native_pattern = re.compile(
         r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]\s*"
-        r"(?:(上午|下午|晚上|傍晚|中午|凌晨|早上)?\s*"
+        r"(?:((?:上午|下午)|(?:晚上|傍晚)|(?:中午|凌晨)|早上)?\s*"
         r"(\d{1,2})(?:(?:[:：]\s*(\d{1,2}))|(?:\s*[时点](?:\s*(\d{1,2})分?)?)))?"
     )
     collected: List[Tuple[int, Tuple[str, str, str, Optional[str], Optional[str]]]] = []
@@ -1643,7 +1618,7 @@ def _format_chinese_match_datetime(
     )
 
 
-def parse_auction_time_range(text: str, field_key: str) -> str | None:
+def parse_auction_time_range(text: str, field_key: str) -> Optional[str]:
     clean = compact_text(text) or ""
     if not clean:
         return None
@@ -1655,7 +1630,7 @@ def parse_auction_time_range(text: str, field_key: str) -> str | None:
         )
     if len(timed_matches) == 1:
         time_only = re.search(
-            r"(?:起|开始)\s*(?:至|到|—|-|~)?\s*(\d{1,2})(?:(?:[:：]\s*(\d{1,2}))|(?:\s*[时点](?:\s*(\d{1,2})分?)?))\s*(?:止|结束)?",
+            r"(?:(?:起|开始))\s*(?:(?:至|到)|—|-|~)?\s*(\d{1,2})(?:(?:[:：]\s*(\d{1,2}))|(?:\s*[时点](?:\s*(\d{1,2})分?)?))\s*(?:(?:止|结束))?",
             clean,
         )
         if time_only and field_key == "signup_end_time":
@@ -1667,9 +1642,9 @@ def parse_auction_time_range(text: str, field_key: str) -> str | None:
             )
     pattern = re.compile(
         r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日\s*(\d{1,2})(?:[:：时点]\s*(\d{1,2}))?"
-        r"\s*(?:起|开始)?\s*(?:至|到|—|-|~)?\s*"
+        r"\s*(?:(?:起|开始))?\s*(?:(?:至|到)|—|-|~)?\s*"
         r"(?:(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日\s*)?"
-        r"(\d{1,2})(?:[:：时点]\s*(\d{1,2}))?\s*(?:止|结束)?"
+        r"(\d{1,2})(?:[:：时点]\s*(\d{1,2}))?\s*(?:(?:止|结束))?"
     )
     match = pattern.search(clean)
     if not match:
@@ -1823,6 +1798,28 @@ def time_value_conflicts_with_pair(field_key: str, value: Any, values: Dict[str,
     return False
 
 
+def time_value_conflicts_with_source_pair(
+    field_key: str,
+    value: Any,
+    source_text: Any,
+    values: Dict[str, Any],
+) -> bool:
+    if field_key not in TIME_FIELD_KEYS:
+        return False
+    source_start, source_end, _ = extract_auction_time_range_text(source_text)
+    if not source_start or not source_end:
+        return False
+    if field_key == "signup_end_time":
+        existing_start = parse_datetime_value(values.get("signup_start_time"))
+        source_start_dt = parse_datetime_value(source_start)
+        return bool(existing_start and source_start_dt and existing_start != source_start_dt)
+    if field_key == "signup_start_time":
+        existing_end = parse_datetime_value(values.get("signup_end_time"))
+        source_end_dt = parse_datetime_value(source_end)
+        return bool(existing_end and source_end_dt and existing_end != source_end_dt)
+    return False
+
+
 def ai_result_source_text(ai_result: Any) -> str:
     return (
         compact_text(getattr(ai_result, "original_text", None))
@@ -1872,8 +1869,8 @@ def clean_contact_name(name: Any) -> Optional[str]:
     text = compact_text(name)
     if not text:
         return None
-    text = re.sub(r"^(?:咨询|看样|管理人|管理员)?联系人\s*[:：]?", "", text)
-    text = re.sub(r"^(?:联系电话|咨询电话|联系方式|电话\d?|手机)\s*[:：]?", "", text)
+    text = re.sub(r"^(?:(?:咨询|看样)|(?:管理人|管理员))?联系人\s*[:：]?", "", text)
+    text = re.sub(r"^(?:(?:联系电话|咨询电话)|(?:联系方式|电话)\d?|手机)\s*[:：]?", "", text)
     text = text.strip(" ：:，,、；;()（）")
     if not text or text in CONTACT_NAME_STOPWORDS:
         return None
@@ -1895,7 +1892,7 @@ def extract_contact_entries_from_line(line: Any) -> List[str]:
     used: set[str] = set()
 
     leading_name = re.search(
-        r"(?:咨询联系人|看样联系人|联系人)\s*[:：]?\s*([\u4e00-\u9fffA-Za-z]{2,12}(?:先生|女士|法官|经理)?)",
+        r"(?:(?:咨询联系人|看样联系人)|联系人)\s*[:：]?\s*([\u4e00-\u9fffA-Za-z]{2,12}(?:(?:先生|女士)|(?:法官|经理))?)",
         clean,
     )
     if leading_name:
@@ -1906,7 +1903,7 @@ def extract_contact_entries_from_line(line: Any) -> List[str]:
             used.add(normalize_contact_phone(phone))
 
     pair_pattern = re.compile(
-        rf"([\u4e00-\u9fffA-Za-z]{{2,12}}(?:先生|女士|法官|经理)?)\s*[:：,，、]?\s*({PHONE_SIGNAL_RE.pattern})"
+        rf"([\u4e00-\u9fffA-Za-z]{{2,12}}(?:(?:先生|女士)|(?:法官|经理))?)\s*[:：,，、]?\s*({PHONE_SIGNAL_RE.pattern})"
     )
     for match in pair_pattern.finditer(clean):
         name = clean_contact_name(match.group(1))
@@ -1953,7 +1950,7 @@ def normalize_contact_info(value: Any) -> Optional[str]:
         if all(signal in seen_signals for signal in normalized_signals):
             continue
         cleaned = re.sub(
-            r"^(?:咨询电话|联系电话|联系方式|联系号码|电话\d?|中国东方咨询电话|京东平台咨询电话)\s*[:：]?\s*",
+            r"^(?:(?:咨询电话|联系电话)|(?:联系方式|联系号码)|电话\d?|(?:中国东方咨询电话|京东平台咨询电话))\s*[:：]?\s*",
             "",
             part,
         )
@@ -1991,7 +1988,10 @@ def parse_datetime_value(value: Any) -> Optional[dt.datetime]:
         formatted = format_time(text)
         if formatted and formatted != text:
             text = formatted
+    text = re.sub(r"([T ][0-2]\d:\d{2}(?::\d{2})?)(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$", r"\1", text)
     for fmt in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
         "%Y/%m/%d %H:%M:%S",
@@ -2273,6 +2273,14 @@ def apply_common_ai_batch(
             )
             continue
         value = normalize_time_field(field_key, ai_value, source_text)
+        if field_key in TIME_FIELD_KEYS and time_value_conflicts_with_source_pair(field_key, value, source_text, values):
+            logger.info(
+                "batch_ai_common_field_skipped",
+                "AI 时间来自另一段完整竞价时间范围，避免与已提取时间拼接",
+                field_key=field_key,
+                paimai_id=paimai_id,
+            )
+            continue
         if field_key in TIME_FIELD_KEYS and time_value_conflicts_with_pair(field_key, value, values):
             logger.info(
                 "batch_ai_common_field_skipped",
@@ -2407,7 +2415,7 @@ def normalize_ai_ip_details(raw_value: Any) -> List[Dict[str, Any]]:
     return details
 
 
-AGGREGATED_IP_DETAIL_RE = re.compile(r"[（(]?\s*\d+\s*(?:项|件|个)[）)]?")
+AGGREGATED_IP_DETAIL_RE = re.compile(r"[（(]?\s*\d+\s*(?:(?:项|件)|个)[）)]?")
 
 
 def ip_details_look_aggregated(details: List[Dict[str, Any]]) -> bool:
@@ -2449,15 +2457,15 @@ def normalize_ip_count_type(value: Any) -> str:
     return text
 
 
-def extract_ip_summary_details_from_text(text: Any) -> Tuple[str | None, List[Dict[str, Any]]]:
+def extract_ip_summary_details_from_text(text: Any) -> Tuple[Optional[str], List[Dict[str, Any]]]:
     """从标题或正文中的“7项软件著作权及17项专利权”提取数量和概要明细。"""
     source = compact_text(text)
     if not source:
         return None, []
     type_pattern = "|".join(re.escape(item) for item in sorted(IP_COUNT_TYPES, key=len, reverse=True))
     patterns = (
-        re.compile(rf"(?P<count>\d+)\s*(?:项|件|个)\s*(?P<type>{type_pattern})"),
-        re.compile(rf"(?P<type>{type_pattern})\s*(?P<count>\d+)\s*(?:项|件|个)"),
+        re.compile(rf"(?P<count>\d+)\s*(?:(?:项|件)|个)\s*(?P<type>{type_pattern})"),
+        re.compile(rf"(?P<type>{type_pattern})\s*(?P<count>\d+)\s*(?:(?:项|件)|个)"),
     )
     matches: List[Tuple[str, int, str, int]] = []
     seen: set[Tuple[str, int, str]] = set()
@@ -2541,937 +2549,6 @@ def ai_extract_debt_details(parsed: ParsedHTML, notice_parsed: ParsedHTML, paima
     if not ai_result or is_ai_blank(getattr(ai_result, "value", None)):
         return [], 0.0
     return normalize_ai_debt_details(getattr(ai_result, "value", None)), getattr(ai_result, "confidence", 0.0)
-
-
-# ===== 数据库操作类（使用自定义异常） =====
-class JDScraperDatabase:
-    def __init__(self, path: Path | str) -> None:
-        self.path = Path(path)
-
-    @contextmanager
-    def connect(self):
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise DatabaseError(operation="database_connect", message=str(e), table_name=None) from e
-        finally:
-            conn.close()
-
-    def init_schema(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS crawl_batches (
-                  batch_id TEXT PRIMARY KEY,
-                  started_at TEXT,
-                  finished_at TEXT,
-                  parameters_json TEXT,
-                  status TEXT,
-                  message TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS raw_payloads (
-                  paimai_id TEXT PRIMARY KEY,
-                  batch_id TEXT,
-                  source_url TEXT,
-                  list_json TEXT,
-                  detail_json TEXT,
-                  product_basic_json TEXT,
-                  realtime_json TEXT,
-                  description_html TEXT,
-                  notice_html TEXT,
-                  announcement_html TEXT,
-                  attachments_json TEXT,
-                  attachment_texts TEXT,
-                  vendor_json TEXT,
-                  crawled_at TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS field_catalog (
-                  field_namespace TEXT,
-                  asset_group TEXT,
-                  field_key TEXT,
-                  field_label TEXT,
-                  field_scope TEXT,
-                  data_type TEXT,
-                  required_for_display INTEGER,
-                  aliases_json TEXT,
-                  source_priority_json TEXT,
-                  export_order INTEGER,
-                  PRIMARY KEY (field_namespace, field_key)
-                );
-
-                CREATE TABLE IF NOT EXISTS field_extractions (
-                  paimai_id TEXT,
-                  field_namespace TEXT,
-                  asset_group TEXT,
-                  field_key TEXT,
-                  field_label TEXT,
-                  raw_value TEXT,
-                  normalized_value TEXT,
-                  value_type TEXT,
-                  numeric_value DECIMAL(18,2),
-                  date_value DATE,
-                  datetime_value DATETIME,
-                  status TEXT,
-                  method TEXT,
-                  confidence REAL,
-                  source_payload_type TEXT,
-                  source_path TEXT,
-                  source_excerpt TEXT,
-                  missing_reason TEXT,
-                  extracted_at TEXT,
-                  PRIMARY KEY (paimai_id, field_namespace, field_key)
-                );
-                """
-            )
-            self._ensure_columns(
-                conn,
-                "raw_payloads",
-                {
-                    "notice_html": "TEXT",
-                    "announcement_html": "TEXT",
-                    "attachment_texts": "TEXT",
-                    "product_basic_json": "TEXT",
-                },
-            )
-            self._ensure_columns(
-                conn,
-                "field_extractions",
-                {
-                    "value_type": "TEXT",
-                    "numeric_value": "DECIMAL(18,2)",
-                    "date_value": "DATE",
-                    "datetime_value": "DATETIME",
-                },
-            )
-            common_columns = ",\n".join(
-                f"{field.key} {COMMON_FIELD_DATA_TYPES.get(field.key, 'TEXT')}"
-                for field in COMMON_FIELDS
-            )
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS auction_items_common (
-                  paimai_id TEXT PRIMARY KEY,
-                  batch_id TEXT,
-                  source_url TEXT,
-                  asset_group TEXT NOT NULL,
-                  asset_group_label TEXT,
-                  jd_category_id TEXT,
-                  jd_category_name TEXT,
-                  {common_columns},
-                  common_fields_json TEXT,
-                  updated_at TEXT
-                )
-                """
-            )
-            self._ensure_columns(
-                conn,
-                "auction_items_common",
-                {
-                    "source_platform": "TEXT",
-                    "source_item_id": "TEXT",
-                    "disposal_agency": "TEXT",
-                    "signup_start_time_norm": "DATETIME",
-                    "signup_end_time_norm": "DATETIME",
-                    "start_price_display": "TEXT",
-                    "start_price_amount": "DECIMAL(18,2)",
-                    "current_price_display": "TEXT",
-                    "current_price_amount": "DECIMAL(18,2)",
-                    "final_price_display": "TEXT",
-                    "final_price_amount": "DECIMAL(18,2)",
-                    "assessment_price_amount": "DECIMAL(18,2)",
-                    "assessment_amount": "DECIMAL(18,2)",
-                    "assessment_date": "DATE",
-                    "dedup_hash": "TEXT",
-                },
-            )
-            self._ensure_columns(
-                conn,
-                "crawl_batches",
-                {
-                    "summary_json": "LONGTEXT",
-                },
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_common_dedup_hash
-                ON auction_items_common(dedup_hash)
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS asset_dedup_index (
-                  source_platform TEXT,
-                  source_item_id TEXT,
-                  paimai_id TEXT,
-                  dedup_hash TEXT,
-                  asset_group TEXT,
-                  project_name TEXT,
-                  asset_location TEXT,
-                  identity_basis_json TEXT,
-                  updated_at DATETIME,
-                  PRIMARY KEY (source_platform, source_item_id)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_asset_dedup_hash
-                ON asset_dedup_index(dedup_hash)
-                """
-            )
-
-            for group, table in ASSET_TABLES.items():
-                type_map = SPECIAL_FIELD_DATA_TYPES.get(group, {})
-                field_columns = ",\n".join(
-                    f"{field.key} {type_map.get(field.key, 'TEXT')}"
-                    for field in SPECIAL_FIELDS[group]
-                )
-                conn.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {table} (
-                      paimai_id TEXT PRIMARY KEY,
-                      {field_columns},
-                      special_fields_json TEXT,
-                      updated_at TEXT
-                    )
-                    """
-                )
-                self._ensure_columns(
-                    conn,
-                    table,
-                    {
-                        field.key: SPECIAL_FIELD_DATA_TYPES.get(group, {}).get(field.key, "TEXT")
-                        for field in SPECIAL_FIELDS[group]
-                    },
-                )
-                self._ensure_columns(conn, table, SPECIAL_NORMALIZED_COLUMNS.get(group, {}))
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS asset_debt_details (
-                  paimai_id TEXT,
-                  detail_index INTEGER,
-                  sequence_no TEXT,
-                  debtor_name TEXT,
-                  principal_balance TEXT,
-                  principal_balance_amount DECIMAL(18,2),
-                  interest_balance TEXT,
-                  interest_balance_amount DECIMAL(18,2),
-                  recovery_fee TEXT,
-                  recovery_fee_amount DECIMAL(18,2),
-                  claim_total TEXT,
-                  claim_total_amount DECIMAL(18,2),
-                  collateral TEXT,
-                  guarantor TEXT,
-                  litigation_status TEXT,
-                  benchmark_date TEXT,
-                  benchmark_date_norm DATE,
-                  amount_unit TEXT,
-                  source_excerpt TEXT,
-                  updated_at TEXT,
-                  PRIMARY KEY (paimai_id, detail_index)
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS asset_ip_details (
-                  paimai_id TEXT,
-                  detail_index INTEGER,
-                  sequence_no TEXT,
-                  ip_name TEXT,
-                  certificate_no TEXT,
-                  ip_type TEXT,
-                  application_date TEXT,
-                  application_date_norm DATE,
-                  patent_type TEXT,
-                  status TEXT,
-                  source_excerpt TEXT,
-                  updated_at TEXT,
-                  PRIMARY KEY (paimai_id, detail_index)
-                )
-                """
-            )
-            self._ensure_columns(
-                conn,
-                "asset_debt_details",
-                {
-                    "debtor_name": "TEXT",
-                    "principal_balance_amount": "DECIMAL(18,2)",
-                    "interest_balance_amount": "DECIMAL(18,2)",
-                    "recovery_fee_amount": "DECIMAL(18,2)",
-                    "claim_total_amount": "DECIMAL(18,2)",
-                    "guarantor": "TEXT",
-                    "litigation_status": "TEXT",
-                    "benchmark_date_norm": "DATE",
-                },
-            )
-            self._ensure_columns(
-                conn,
-                "asset_ip_details",
-                {
-                    "sequence_no": "TEXT",
-                    "ip_name": "TEXT",
-                    "certificate_no": "TEXT",
-                    "ip_type": "TEXT",
-                    "application_date": "TEXT",
-                    "application_date_norm": "DATE",
-                    "patent_type": "TEXT",
-                    "status": "TEXT",
-                    "source_excerpt": "TEXT",
-                },
-            )
-
-    @staticmethod
-    def _ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
-        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for column, definition in columns.items():
-            if column not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-    def seed_field_catalog(self) -> None:
-        with self.connect() as conn:
-            conn.execute("DELETE FROM field_catalog")
-            rows = []
-            for order, field in enumerate(COMMON_FIELDS, start=1):
-                rows.append(
-                    (
-                        "common",
-                        "ALL",
-                        field.key,
-                        field.label,
-                        "common",
-                        COMMON_FIELD_DATA_TYPES.get(field.key, "TEXT"),
-                        1,
-                        safe_json_dumps((field.label, *field.aliases)),
-                        safe_json_dumps(["structured_api", "html_table", "html_text"]),
-                        order,
-                    )
-                )
-            for group, fields in SPECIAL_FIELDS.items():
-                for order, field in enumerate(fields, start=10):
-                    rows.append(
-                        (
-                            f"special.{group}",
-                            group,
-                            field.key,
-                            field.label,
-                            "special",
-                            SPECIAL_FIELD_DATA_TYPES.get(group, {}).get(field.key, "TEXT"),
-                            1,
-                            safe_json_dumps((field.label, *field.aliases)),
-                            safe_json_dumps(["structured_api", "html_table", "html_text"]),
-                            order,
-                        )
-                    )
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO field_catalog
-                (field_namespace, asset_group, field_key, field_label, field_scope, data_type,
-                 required_for_display, aliases_json, source_priority_json, export_order)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-    def start_batch(self, parameters: Dict[str, Any]) -> str:
-        batch_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
-        logger.info("batch_started", f"开始批次: {batch_id}", batch_id=batch_id)
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO crawl_batches (batch_id, started_at, parameters_json, status, summary_json)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    batch_id,
-                    now_text(),
-                    safe_json_dumps(parameters),
-                    "running",
-                    safe_json_dumps({"parameters": parameters, "status": "running", "message": ""}),
-                ),
-            )
-        return batch_id
-
-    def finish_batch(self, batch_id: str, status: str, message: str = "") -> None:
-        logger.info(
-            "batch_finished",
-            f"批次完成: {batch_id}",
-            batch_id=batch_id,
-            status=status,
-        )
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT summary_json, parameters_json FROM crawl_batches WHERE batch_id=?",
-                (batch_id,),
-            ).fetchone()
-            summary: Dict[str, Any] = {}
-            if row and row["summary_json"]:
-                try:
-                    summary = json.loads(row["summary_json"])
-                except json.JSONDecodeError:
-                    summary = {}
-            if not summary and row and row["parameters_json"]:
-                try:
-                    summary["parameters"] = json.loads(row["parameters_json"])
-                except json.JSONDecodeError:
-                    summary["parameters"] = row["parameters_json"]
-            summary.update({"status": status, "message": message})
-            conn.execute(
-                """
-                UPDATE crawl_batches
-                SET finished_at=?, status=?, message=?, summary_json=?
-                WHERE batch_id=?
-                """,
-                (now_text(), status, message, safe_json_dumps(summary), batch_id),
-            )
-
-    def get_batch_stats(self, batch_id: str) -> Optional[Dict[str, Any]]:
-        with self.connect() as conn:
-            row = conn.execute(
-                "SELECT summary_json FROM crawl_batches WHERE batch_id=?",
-                (batch_id,),
-            ).fetchone()
-        if not row or not row["summary_json"]:
-            return None
-        try:
-            return json.loads(row["summary_json"])
-        except json.JSONDecodeError:
-            return None
-
-    def upsert_raw_payloads(
-        self,
-        *,
-        paimai_id: str,
-        batch_id: str,
-        source_url: str,
-        list_json: Any,
-        detail_json: Any,
-        realtime_json: Any,
-        description_html: Optional[str],
-        product_basic_json: Any = None,
-        notice_html: Optional[str] = None,
-        announcement_html: Optional[str] = None,
-        attachments_json: Any = None,
-        vendor_json: Any = None,
-    ) -> None:
-        logger.debug(
-            "db_upsert_raw_payloads",
-            f"写入原始数据: {paimai_id}",
-            paimai_id=paimai_id,
-        )
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO raw_payloads
-                (paimai_id, batch_id, source_url, list_json, detail_json, product_basic_json, realtime_json,
-                 description_html, notice_html, announcement_html, attachments_json, attachment_texts, vendor_json, crawled_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(paimai_id) DO UPDATE SET
-                  batch_id=excluded.batch_id,
-                  source_url=excluded.source_url,
-                  list_json=excluded.list_json,
-                  detail_json=excluded.detail_json,
-                  product_basic_json=excluded.product_basic_json,
-                  realtime_json=excluded.realtime_json,
-                  description_html=excluded.description_html,
-                  notice_html=excluded.notice_html,
-                  announcement_html=excluded.announcement_html,
-                  attachments_json=excluded.attachments_json,
-                  attachment_texts=excluded.attachment_texts,
-                  vendor_json=excluded.vendor_json,
-                  crawled_at=excluded.crawled_at
-                """,
-                (
-                    paimai_id,
-                    batch_id,
-                    source_url,
-                    safe_json_dumps(list_json),
-                    safe_json_dumps(detail_json),
-                    safe_json_dumps(product_basic_json or {}),
-                    safe_json_dumps(realtime_json),
-                    description_html or "",
-                    notice_html or "",
-                    announcement_html or "",
-                    safe_json_dumps(attachments_json),
-                    "",
-                    safe_json_dumps(vendor_json or {}),
-                    now_text(),
-                ),
-            )
-
-    def update_attachment_texts(self, paimai_id: str, attachment_texts: Any) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE raw_payloads
-                SET attachment_texts=?
-                WHERE paimai_id=?
-                """,
-                (safe_json_dumps(attachment_texts), paimai_id),
-            )
-
-    def upsert_common_item(
-        self,
-        *,
-        paimai_id: str,
-        batch_id: str,
-        asset_group: str,
-        jd_category_id: str,
-        jd_category_name: str,
-        values: Dict[str, Any],
-        field_results: Dict[str, Dict[str, Any]],
-        special_values: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        full_values = {field.key: compact_text(values.get(field.key)) for field in COMMON_FIELDS}
-        normalized_values = normalized_common_db_values(
-            asset_group=asset_group,
-            common_values=full_values,
-            special_values=special_values or {},
-        )
-        normalized_values["source_item_id"] = paimai_id
-        data = {
-            "paimai_id": paimai_id,
-            "batch_id": batch_id,
-            "source_url": f"https://paimai.jd.com/{paimai_id}",
-            "asset_group": asset_group,
-            "asset_group_label": ASSET_GROUP_LABELS[asset_group],
-            "jd_category_id": jd_category_id,
-            "jd_category_name": jd_category_name,
-            **full_values,
-            **normalized_values,
-            "common_fields_json": safe_json_dumps(full_values),
-            "updated_at": now_text(),
-        }
-        self._upsert_row("auction_items_common", "paimai_id", data)
-        self.upsert_dedup_index(
-            paimai_id=paimai_id,
-            asset_group=asset_group,
-            common_values=full_values,
-            special_values=special_values or {},
-            dedup_hash=normalized_values.get("dedup_hash"),
-        )
-        self._upsert_field_extractions(
-            paimai_id=paimai_id,
-            namespace="common",
-            asset_group=asset_group,
-            fields=COMMON_FIELDS,
-            values=full_values,
-            field_results=field_results,
-        )
-
-    def upsert_special_item(
-        self,
-        *,
-        paimai_id: str,
-        asset_group: str,
-        values: Dict[str, Any],
-        field_results: Dict[str, Dict[str, Any]],
-    ) -> None:
-        fields = SPECIAL_FIELDS[asset_group]
-        full_values = {field.key: compact_text(values.get(field.key)) for field in fields}
-        table = ASSET_TABLES[asset_group]
-        data = {
-            "paimai_id": paimai_id,
-            **full_values,
-            **normalized_special_db_values(asset_group, full_values),
-            "special_fields_json": safe_json_dumps(full_values),
-            "updated_at": now_text(),
-        }
-        self._upsert_row(table, "paimai_id", data)
-        if asset_group == "debt":
-            self._clear_legacy_debt_aggregate_columns(paimai_id)
-        self._upsert_field_extractions(
-            paimai_id=paimai_id,
-            namespace=f"special.{asset_group}",
-            asset_group=asset_group,
-            fields=fields,
-            values=full_values,
-            field_results=field_results,
-        )
-
-    def upsert_dedup_index(
-        self,
-        *,
-        paimai_id: str,
-        asset_group: str,
-        common_values: Dict[str, Any],
-        special_values: Dict[str, Any],
-        dedup_hash: Any,
-    ) -> None:
-        if is_blank(dedup_hash):
-            return
-        fields = DEDUP_FIELDS_CONFIG.get(asset_group) or DEDUP_FIELDS_CONFIG["other"]
-        identity_basis = {}
-        for field_key in fields:
-            raw_value = special_values.get(field_key)
-            if is_blank(raw_value):
-                raw_value = common_values.get(field_key)
-            normalized = normalize_dedup_part(field_key, raw_value)
-            if normalized:
-                identity_basis[field_key] = {
-                    "raw": compact_text(raw_value),
-                    "normalized": normalized,
-                }
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO asset_dedup_index
-                (source_platform, source_item_id, paimai_id, dedup_hash, asset_group,
-                 project_name, asset_location, identity_basis_json, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_platform, source_item_id) DO UPDATE SET
-                  paimai_id=excluded.paimai_id,
-                  dedup_hash=excluded.dedup_hash,
-                  asset_group=excluded.asset_group,
-                  project_name=excluded.project_name,
-                  asset_location=excluded.asset_location,
-                  identity_basis_json=excluded.identity_basis_json,
-                  updated_at=excluded.updated_at
-                """,
-                (
-                    "jd",
-                    paimai_id,
-                    paimai_id,
-                    compact_text(dedup_hash),
-                    asset_group,
-                    common_values.get("project_name"),
-                    common_values.get("asset_location"),
-                    safe_json_dumps(identity_basis),
-                    now_text(),
-                ),
-            )
-
-    def find_duplicates(self, paimai_id: str, dedup_hash: str) -> List[Dict[str, Any]]:
-        if is_blank(dedup_hash):
-            return []
-        with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT paimai_id, project_name, asset_group, project_status, auction_stage,
-                       start_price_raw, final_price_raw, updated_at
-                FROM auction_items_common
-                WHERE dedup_hash = ? AND paimai_id != ?
-                ORDER BY updated_at DESC
-                """,
-                (dedup_hash, paimai_id),
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    def refresh_normalized_index_for_existing_items(self) -> int:
-        refreshed = 0
-        with self.connect() as conn:
-            common_rows = conn.execute("SELECT * FROM auction_items_common").fetchall()
-        for common_row in common_rows:
-            paimai_id = common_row["paimai_id"]
-            asset_group = common_row["asset_group"]
-            common_values = {field.key: common_row[field.key] for field in COMMON_FIELDS if field.key in common_row.keys()}
-            special_values: Dict[str, Any] = {}
-            table = ASSET_TABLES.get(asset_group)
-            if table:
-                with self.connect() as conn:
-                    special_row = conn.execute(f"SELECT * FROM {table} WHERE paimai_id=?", (paimai_id,)).fetchone()
-                if special_row:
-                    special_values = {
-                        field.key: special_row[field.key]
-                        for field in SPECIAL_FIELDS.get(asset_group, ())
-                        if field.key in special_row.keys()
-                    }
-            normalized_values = normalized_common_db_values(
-                asset_group=asset_group,
-                common_values=common_values,
-                special_values=special_values,
-            )
-            normalized_values["source_item_id"] = paimai_id
-            assignments = ", ".join(f"{column}=?" for column in normalized_values)
-            with self.connect() as conn:
-                conn.execute(
-                    f"UPDATE auction_items_common SET {assignments} WHERE paimai_id=?",
-                    [normalized_values[column] for column in normalized_values] + [paimai_id],
-                )
-            special_normalized_values = normalized_special_db_values(asset_group, special_values)
-            if special_normalized_values and table:
-                assignments = ", ".join(f"{column}=?" for column in special_normalized_values)
-                with self.connect() as conn:
-                    conn.execute(
-                        f"UPDATE {table} SET {assignments} WHERE paimai_id=?",
-                        [special_normalized_values[column] for column in special_normalized_values] + [paimai_id],
-                    )
-            self.upsert_dedup_index(
-                paimai_id=paimai_id,
-                asset_group=asset_group,
-                common_values=common_values,
-                special_values=special_values,
-                dedup_hash=normalized_values.get("dedup_hash"),
-            )
-            refreshed += 1
-        return refreshed
-
-    def upsert_debt_details(self, *, paimai_id: str, details: List[Dict[str, Any]]) -> None:
-        with self.connect() as conn:
-            conn.execute("DELETE FROM asset_debt_details WHERE paimai_id=?", (paimai_id,))
-            rows = []
-            for index, detail in enumerate(details, start=1):
-                principal_balance = compact_text(detail.get("principal_balance"))
-                interest_balance = compact_text(detail.get("interest_balance"))
-                recovery_fee = compact_text(detail.get("recovery_fee"))
-                claim_total = compact_text(detail.get("claim_total"))
-                benchmark_date = compact_text(detail.get("benchmark_date"))
-                rows.append(
-                    (
-                        paimai_id,
-                        index,
-                        compact_text(detail.get("sequence_no")),
-                        compact_text(detail.get("debtor_name") or detail.get("debtor_or_asset")),
-                        principal_balance,
-                        decimal_to_db(money_numeric(principal_balance)),
-                        interest_balance,
-                        decimal_to_db(money_numeric(interest_balance)),
-                        recovery_fee,
-                        decimal_to_db(money_numeric(recovery_fee)),
-                        claim_total,
-                        decimal_to_db(money_numeric(claim_total)),
-                        compact_text(detail.get("collateral")),
-                        compact_text(detail.get("guarantor") or detail.get("guarantor_or_related_party")),
-                        compact_text(detail.get("litigation_status")),
-                        benchmark_date,
-                        date_to_db(benchmark_date),
-                        compact_text(detail.get("amount_unit")),
-                        (compact_text(detail.get("source_excerpt")) or "")[:500],
-                        now_text(),
-                    )
-                )
-            conn.executemany(
-                """
-                INSERT INTO asset_debt_details
-                (paimai_id, detail_index, sequence_no, debtor_name, principal_balance,
-                 principal_balance_amount, interest_balance, interest_balance_amount,
-                 recovery_fee, recovery_fee_amount, claim_total, claim_total_amount,
-                 collateral, guarantor, litigation_status, benchmark_date,
-                 benchmark_date_norm, amount_unit, source_excerpt, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-    def upsert_ip_details(self, *, paimai_id: str, details: List[Dict[str, Any]]) -> None:
-        with self.connect() as conn:
-            conn.execute("DELETE FROM asset_ip_details WHERE paimai_id=?", (paimai_id,))
-            rows = []
-            for index, detail in enumerate(details, start=1):
-                application_date = compact_text(detail.get("application_date"))
-                rows.append(
-                    (
-                        paimai_id,
-                        index,
-                        compact_text(detail.get("sequence_no")) or str(index),
-                        compact_text(detail.get("ip_name")),
-                        compact_text(detail.get("certificate_no")),
-                        compact_text(detail.get("ip_type")),
-                        application_date,
-                        date_to_db(application_date),
-                        compact_text(detail.get("patent_type")),
-                        compact_text(detail.get("status")),
-                        (compact_text(detail.get("source_excerpt")) or "")[:500],
-                        now_text(),
-                    )
-                )
-            conn.executemany(
-                """
-                INSERT INTO asset_ip_details
-                (paimai_id, detail_index, sequence_no, ip_name, certificate_no, ip_type,
-                 application_date, application_date_norm, patent_type, status, source_excerpt, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-    def _clear_legacy_debt_aggregate_columns(self, paimai_id: str) -> None:
-        table = ASSET_TABLES["debt"]
-        with self.connect() as conn:
-            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-            columns = [column for column in DEBT_LEGACY_AGGREGATE_FIELDS if column in existing]
-            if not columns:
-                return
-            assignments = ", ".join(f"{column}=NULL" for column in columns)
-            conn.execute(f"UPDATE {table} SET {assignments} WHERE paimai_id=?", (paimai_id,))
-
-    def _upsert_row(self, table: str, primary_key: str, data: Dict[str, Any]) -> None:
-        columns = list(data)
-        placeholders = ", ".join("?" for _ in columns)
-        updates = ", ".join(f"{column}=excluded.{column}" for column in columns if column != primary_key)
-        with self.connect() as conn:
-            conn.execute(
-                f"""
-                INSERT INTO {table} ({", ".join(columns)})
-                VALUES ({placeholders})
-                ON CONFLICT({primary_key}) DO UPDATE SET {updates}
-                """,
-                [data[column] for column in columns],
-            )
-
-    def _upsert_field_extractions(
-        self,
-        *,
-        paimai_id: str,
-        namespace: str,
-        asset_group: str,
-        fields: Tuple[FieldDef, ...],
-        values: Dict[str, Any],
-        field_results: Dict[str, Dict[str, Any]],
-    ) -> None:
-        rows = []
-        for field in fields:
-            value = values.get(field.key)
-            result = field_results.get(field.key, {})
-            status = result.get("status")
-            confidence = float(result.get("confidence", 0.95 if not is_blank(value) else 0.0))
-            if not status:
-                status = "extracted" if not is_blank(value) else "missing_on_page"
-            typed_values = typed_field_extraction_values(field.key, value)
-            rows.append(
-                (
-                    paimai_id,
-                    namespace,
-                    asset_group,
-                    field.key,
-                    field.label,
-                    compact_text(value),
-                    compact_text(value),
-                    typed_values["value_type"],
-                    typed_values["numeric_value"],
-                    typed_values["date_value"],
-                    typed_values["datetime_value"],
-                    status,
-                    result.get("method", "not_found" if is_blank(value) else "api_or_html"),
-                    confidence,
-                    result.get("source_payload_type", ""),
-                    result.get("source_path", ""),
-                    compact_text(result.get("source_excerpt")),
-                    "" if not is_blank(value) else result.get("missing_reason", "页面或接口未提供该字段"),
-                    now_text(),
-                )
-            )
-        with self.connect() as conn:
-            valid_keys = [field.key for field in fields]
-            placeholders = ", ".join("?" for _ in valid_keys)
-            conn.execute(
-                f"""
-                DELETE FROM field_extractions
-                WHERE paimai_id=?
-                  AND field_namespace=?
-                  AND field_key NOT IN ({placeholders})
-                """,
-                [paimai_id, namespace, *valid_keys],
-            )
-            conn.executemany(
-                """
-                INSERT INTO field_extractions
-                (paimai_id, field_namespace, asset_group, field_key, field_label, raw_value,
-                 normalized_value, value_type, numeric_value, date_value, datetime_value,
-                 status, method, confidence, source_payload_type,
-                 source_path, source_excerpt, missing_reason, extracted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(paimai_id, field_namespace, field_key) DO UPDATE SET
-                  asset_group=excluded.asset_group,
-                  field_label=excluded.field_label,
-                  raw_value=excluded.raw_value,
-                  normalized_value=excluded.normalized_value,
-                  value_type=excluded.value_type,
-                  numeric_value=excluded.numeric_value,
-                  date_value=excluded.date_value,
-                  datetime_value=excluded.datetime_value,
-                  status=excluded.status,
-                  method=excluded.method,
-                  confidence=excluded.confidence,
-                  source_payload_type=excluded.source_payload_type,
-                  source_path=excluded.source_path,
-                  source_excerpt=excluded.source_excerpt,
-                  missing_reason=excluded.missing_reason,
-                  extracted_at=excluded.extracted_at
-                """,
-                rows,
-            )
-
-    def export_csvs(self, output_dir: Path) -> Dict[str, Path]:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        exports: Dict[str, Path] = {}
-        with self.connect() as conn:
-            common_path = output_dir / "auction_items_common.csv"
-            self._write_query_csv(conn, "SELECT * FROM auction_items_common ORDER BY jd_category_id, paimai_id", common_path)
-            exports["common"] = common_path
-
-            field_path = output_dir / "field_extractions.csv"
-            self._write_query_csv(
-                conn,
-                "SELECT * FROM field_extractions ORDER BY paimai_id, field_namespace, field_key",
-                field_path,
-            )
-            exports["field_extractions"] = field_path
-
-            for group, table in ASSET_TABLES.items():
-                label = ASSET_GROUP_LABELS[group]
-                path = output_dir / f"{group}_{label}.csv"
-                query = f"""
-                    SELECT c.*, s.*
-                    FROM auction_items_common c
-                    JOIN {table} s ON c.paimai_id = s.paimai_id
-                    WHERE c.asset_group = ?
-                    ORDER BY c.jd_category_id, c.paimai_id
-                """
-                self._write_query_csv(conn, query, path, (group,))
-                exports[group] = path
-
-            debt_detail_path = output_dir / "debt_details_债权明细.csv"
-            self._write_query_csv(
-                conn,
-                "SELECT * FROM asset_debt_details ORDER BY paimai_id, detail_index",
-                debt_detail_path,
-            )
-            exports["debt_details"] = debt_detail_path
-
-            ip_detail_path = output_dir / "ip_details_知识产权明细.csv"
-            self._write_query_csv(
-                conn,
-                "SELECT * FROM asset_ip_details ORDER BY paimai_id, detail_index",
-                ip_detail_path,
-            )
-            exports["ip_details"] = ip_detail_path
-
-            qa_path = output_dir / "qa_field_coverage.csv"
-            qa_query = """
-                SELECT asset_group, field_namespace, field_key, field_label,
-                       COUNT(*) AS total,
-                       SUM(CASE WHEN status='extracted' THEN 1 ELSE 0 END) AS extracted,
-                       SUM(CASE WHEN status='missing_on_page' THEN 1 ELSE 0 END) AS missing_on_page,
-                       SUM(CASE WHEN status='empty_on_page' THEN 1 ELSE 0 END) AS empty_on_page,
-                       SUM(CASE WHEN status='parse_error' THEN 1 ELSE 0 END) AS parse_error,
-                       SUM(CASE WHEN status='conflict' THEN 1 ELSE 0 END) AS conflict
-                FROM field_extractions
-                GROUP BY asset_group, field_namespace, field_key, field_label
-                ORDER BY asset_group, field_namespace, field_key
-            """
-            self._write_query_csv(conn, qa_query, qa_path)
-            exports["qa"] = qa_path
-        return exports
-
-    @staticmethod
-    def _write_query_csv(conn: sqlite3.Connection, query: str, path: Path, params: Tuple[Any, ...] = ()) -> None:
-        cursor = conn.execute(query, params)
-        rows = cursor.fetchall()
-        fieldnames = [description[0] for description in cursor.description]
-        with path.open("w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(fieldnames)
-            for row in rows:
-                writer.writerow([row[field] for field in fieldnames])
-
 
 # ===== API 客户端（使用自定义异常 + 配置） =====
 class JDClient:
@@ -3759,7 +2836,7 @@ def extract_media_urls(core: Dict[str, Any], attachments: Any = None) -> List[st
     return urls
 
 
-AREA_UNIT_RE = re.compile(r"(平方米|平方|平米|㎡|m2|m²|亩|公顷)")
+AREA_UNIT_RE = re.compile(r"((?:平方米|平方)|平米|㎡|(?:m2|m²)|(?:亩|公顷))")
 
 
 def normalize_area_value(value: Any, source_text: Any = None) -> Any:
@@ -3767,7 +2844,7 @@ def normalize_area_value(value: Any, source_text: Any = None) -> Any:
     if not text:
         return value
     if AREA_UNIT_RE.search(text):
-        direct_match = re.search(r"(\d[\d,]*(?:\.\d+)?)\s*(平方米|平方|平米|㎡|m2|m²|亩|公顷)", text)
+        direct_match = re.search(r"(\d[\d,]*(?:\.\d+)?)\s*((?:平方米|平方)|平米|㎡|(?:m2|m²)|(?:亩|公顷))", text)
         if direct_match:
             number, unit = direct_match.groups()
             return f"{number}{unit}"
@@ -3776,7 +2853,7 @@ def normalize_area_value(value: Any, source_text: Any = None) -> Any:
     if not number_match or not source:
         return text
     wanted = number_match.group(0).replace(",", "")
-    unit_pattern = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(平方米|平方|平米|㎡|m2|m²|亩|公顷)")
+    unit_pattern = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*((?:平方米|平方)|平米|㎡|(?:m2|m²)|(?:亩|公顷))")
     for match in unit_pattern.finditer(source):
         source_number, unit = match.groups()
         if source_number.replace(",", "") == wanted:
@@ -3792,11 +2869,11 @@ def extract_assessment_text(text: Any) -> Tuple[Optional[str], Optional[str]]:
     if "评估" not in clean and "市场价" not in clean and "市场价格" not in clean:
         return None, None
     patterns = (
-        r"(评估(?:价|价格|价值)?\s*[:：]?\s*[¥￥]?\s*[\d,]+(?:\.\d+)?\s*(?:亿元|万元|元|万|亿)(?!\s*(?:倍|折|成|次|%|％)))",
-        r"(评估(?:价|价格|价值)\s*[:：]\s*[¥￥]?\s*[\d,]+(?:\.\d+)?(?!\s*(?:倍|折|成|次|%|％)))",
+        r"(评估(?:(?:价|价格)|价值)?\s*[:：]?\s*[¥￥]?\s*[\d,]+(?:\.\d+)?\s*(?:(?:亿元|万元)|(?:元|万)|亿)(?!\s*(?:(?:倍|折)|(?:成|次)|%|％)))",
+        r"(评估(?:(?:价|价格)|价值)\s*[:：]\s*[¥￥]?\s*[\d,]+(?:\.\d+)?(?!\s*(?:(?:倍|折)|(?:成|次)|%|％)))",
         r"(评估基准日\s*[:：]?\s*\d{4}年\d{1,2}月\d{1,2}日[^。；;]{0,80})",
-        r"(市场(?:价|价格)\s*[:：]?\s*[¥￥]?\s*[\d,]+(?:\.\d+)?\s*(?:亿元|万元|元|万|亿)(?!\s*(?:倍|折|成|次|%|％)))",
-        r"(市场(?:价|价格)\s*[:：]\s*[¥￥]?\s*[\d,]+(?:\.\d+)?(?!\s*(?:倍|折|成|次|%|％)))",
+        r"(市场(?:(?:价|价格))\s*[:：]?\s*[¥￥]?\s*[\d,]+(?:\.\d+)?\s*(?:(?:亿元|万元)|(?:元|万)|亿)(?!\s*(?:(?:倍|折)|(?:成|次)|%|％)))",
+        r"(市场(?:(?:价|价格))\s*[:：]\s*[¥￥]?\s*[\d,]+(?:\.\d+)?(?!\s*(?:(?:倍|折)|(?:成|次)|%|％)))",
     )
     for pattern in patterns:
         match = re.search(pattern, clean)
@@ -3822,9 +2899,9 @@ def extract_use_term_text(text: Any) -> Tuple[Optional[str], Optional[str]]:
     if not clean:
         return None, None
     patterns = (
-        r"((?:土地)?使用(?:截止)?期限\s*[:：]?\s*[^。；;，,]{2,80}?(?:止|日|年|月|$))",
-        r"((?:房屋|土地)?使用权\s*[^。；;，,]{0,20}年[^。；;]{0,120}?(?:止|日))",
-        r"((?:出租|租赁|承租)?(?:期限|年限|租期)\s*[:：]?\s*[^。；;，,]{1,80}?(?:止|日|年|月|$))",
+        r"((?:土地)?使用(?:截止)?期限\s*[:：]?\s*[^。；;，,]{2,80}?(?:(?:止|日)|(?:年|月)|$))",
+        r"((?:(?:房屋|土地))?使用权\s*[^。；;，,]{0,20}年[^。；;]{0,120}?(?:(?:止|日)))",
+        r"((?:(?:出租|租赁)|承租)?(?:(?:期限|年限)|租期)\s*[:：]?\s*[^。；;，,]{1,80}?(?:(?:止|日)|(?:年|月)|$))",
     )
     for pattern in patterns:
         match = re.search(pattern, clean)
@@ -3834,20 +2911,20 @@ def extract_use_term_text(text: Any) -> Tuple[Optional[str], Optional[str]]:
         if not excerpt:
             continue
         value = re.sub(r"^(?:土地)?使用(?:截止)?期限\s*[:：]?\s*", "", excerpt)
-        value = re.sub(r"^(?:房屋|土地)?使用权\s*", "", value)
-        value = re.sub(r"^(?:出租|租赁|承租)?(?:期限|年限|租期)\s*[:：]?\s*", "", value)
+        value = re.sub(r"^(?:(?:房屋|土地))?使用权\s*", "", value)
+        value = re.sub(r"^(?:(?:出租|租赁)|承租)?(?:(?:期限|年限)|租期)\s*[:：]?\s*", "", value)
         return compact_text(value), excerpt
     return None, None
 
 
 FIELD_VALUE_BOUNDARY_RE = re.compile(
     r"\s+(?:"
-    r"名称|坐落|现状|出租面积|租赁面积|承租面积|建筑面积|"
-    r"出租期限|租赁期限|承租期限|租期|免租期|"
-    r"租赁底价|租金年递增率|租金支付方式|履约保证金|"
-    r"允许从事行业|可从事行业|经营业态|准入业态|"
-    r"起拍价|报名保证金|保证金|加价幅度|公告披露期|竞拍时间|拍卖时间|报名时间|"
-    r"物业费收费标准|联系咨询|看样及签约咨询|报名及竞拍咨询"
+    r"(?:名称|坐落)|(?:现状|出租面积)|(?:租赁面积|承租面积)|建筑面积|"
+    r"(?:出租期限|租赁期限)|(?:承租期限|租期)|免租期|"
+    r"(?:租赁底价|租金年递增率)|(?:租金支付方式|履约保证金)|"
+    r"(?:允许从事行业|可从事行业)|(?:经营业态|准入业态)|"
+    r"(?:起拍价|报名保证金)|(?:保证金|加价幅度)|(?:公告披露期|竞拍时间)|(?:拍卖时间|报名时间)|"
+    r"(?:物业费收费标准|联系咨询)|(?:看样及签约咨询|报名及竞拍咨询)"
     r")(?:[（(][^）)]*[）)])?\s*[:：]"
 )
 
@@ -3999,7 +3076,7 @@ def extract_contact_lines(text: str) -> List[str]:
         has_phone = re.search(r"(?:0\d{2,4}-?\d{6,8}|1[3-9]\d{9})", clean)
         if not has_phone:
             continue
-        if re.search(r"(咨询电话|联系电话|联系方式|联系人|法院咨询电话|京东平台咨询电话|中国东方咨询电话|电话\d?|电话[一二]?|经理)", clean):
+        if re.search(r"((?:咨询电话|联系电话)|(?:联系方式|联系人)|(?:法院咨询电话|京东平台咨询电话)|(?:中国东方咨询电话|电话)\d?|电话[一二]?|经理)", clean):
             entries = extract_contact_entries_from_line(clean)
             contacts.extend(entries or [clean])
     return list(dict.fromkeys(contacts))
@@ -4286,6 +3363,21 @@ def extract_common_values(
             "detail_json",
             "vendor.orgName/basicData.shopName",
         )
+    # 处置机构：优先从 extendInfoMap 提取，后备为处置方
+    extend = extract_extend_info(core)
+    agency_value = first_non_blank(
+        compact_text(extend.get("agencyName")) if isinstance(extend, dict) else None,
+        compact_text(extend.get("organizationName")) if isinstance(extend, dict) else None,
+        compact_text(vendor.get("orgName")),
+        compact_text(basic.get("shopName")),
+    )
+    set_value(
+        "disposal_agency",
+        "处置机构",
+        agency_value,
+        "detail_json",
+        "extendInfoMap.agencyName/vendor.orgName",
+    )
     set_value(
         "start_price_raw",
         "起拍价",
@@ -4574,13 +3666,13 @@ def parse_decimal_text(value: Any) -> Any:
         return None
 
 
-def format_decimal(value: Decimal | None) -> str | None:
+def format_decimal(value: Optional[Decimal]) -> Optional[str]:
     if value is None:
         return None
     return f"{value:,.2f}"
 
 
-def extract_amount_unit(text: str) -> str | None:
+def extract_amount_unit(text: str) -> Optional[str]:
     """提取金额单位"""
     if "人民币元" in text or "元" in text:
         return "人民币元"
@@ -4589,7 +3681,7 @@ def extract_amount_unit(text: str) -> str | None:
     return None
 
 
-def extract_benchmark_date_from_text(text: str) -> str | None:
+def extract_benchmark_date_from_text(text: str) -> Optional[str]:
     """从文本中提取基准日"""
     match = re.search(r"基准日[：:]\s*(\d{4}年\d{1,2}月\d{1,2}日|\d{4}[-./]\d{1,2}[-./]\d{1,2})", text)
     if match:
@@ -4607,14 +3699,14 @@ def parse_debt_package_details(parsed: ParsedHTML) -> List[Dict[str, Any]]:
     amount_unit = extract_amount_unit(parsed.text) or "人民币元"
     active_header: List[str] | None = None
 
-    def header_index(headers: List[str], keywords: Tuple[str, ...]) -> int | None:
+    def header_index(headers: List[str], keywords: Tuple[str, ...]) -> Optional[int]:
         for index, header in enumerate(headers):
             normalized = normalize_label(header)
             if any(keyword in normalized for keyword in keywords):
                 return index
         return None
 
-    def cell_at(cells: List[str], index: int | None, default: str = "") -> str:
+    def cell_at(cells: List[str], index: Optional[int], default: str = "") -> str:
         if index is None or index >= len(cells):
             return default
         return cells[index]
@@ -4689,7 +3781,7 @@ def parse_debt_package_details(parsed: ParsedHTML) -> List[Dict[str, Any]]:
     return details
 
 
-def debt_detail_household_count(details: List[Dict[str, Any]]) -> str | None:
+def debt_detail_household_count(details: List[Dict[str, Any]]) -> Optional[str]:
     """用逐户明细推导户数，不把金额和户名压扁回主表。"""
     if not details:
         return None
@@ -4701,7 +3793,7 @@ def debt_detail_household_count(details: List[Dict[str, Any]]) -> str | None:
     return str(len(sequence_numbers) or len(details))
 
 
-def debt_detail_first_benchmark_date(details: List[Dict[str, Any]]) -> str | None:
+def debt_detail_first_benchmark_date(details: List[Dict[str, Any]]) -> Optional[str]:
     for detail in details:
         value = compact_text(detail.get("benchmark_date"))
         if value:
@@ -4709,7 +3801,7 @@ def debt_detail_first_benchmark_date(details: List[Dict[str, Any]]) -> str | Non
     return None
 
 
-def debt_detail_primary_debtor_names(details: List[Dict[str, Any]], *, max_names: int = 10) -> str | None:
+def debt_detail_primary_debtor_names(details: List[Dict[str, Any]], *, max_names: int = 10) -> Optional[str]:
     """用逐户债权明细汇总主债务人名称，金额仍保留在明细表中。"""
     names: List[str] = []
     seen: set[str] = set()
@@ -4726,7 +3818,7 @@ def debt_detail_primary_debtor_names(details: List[Dict[str, Any]], *, max_names
     return "；".join(names)
 
 
-def extract_section_after_heading(text: str, headings: Tuple[str, ...], max_chars: int = 1200) -> Tuple[str | None, str | None]:
+def extract_section_after_heading(text: str, headings: Tuple[str, ...], max_chars: int = 1200) -> Tuple[Optional[str], Optional[str]]:
     """提取标题后的内容片段"""
     lines = [compact_text(line) for line in text.splitlines()]
     lines = [line for line in lines if line]
@@ -4773,7 +3865,7 @@ def is_likely_next_section_heading(line: str) -> bool:
     return not any(heading in clean for heading in SPECIAL_NOTICE_HEADINGS)
 
 
-def extract_risk_notice_section(text: str, max_chars: int = 1600) -> Tuple[str | None, str | None]:
+def extract_risk_notice_section(text: str, max_chars: int = 1600) -> Tuple[Optional[str], Optional[str]]:
     """Extract auction risk/defect notice even when the page does not use a fixed heading."""
     lines = [compact_text(line) for line in text.splitlines()]
     lines = [line for line in lines if line]
@@ -4798,7 +3890,7 @@ def extract_risk_notice_section(text: str, max_chars: int = 1600) -> Tuple[str |
         "\u8d44\u4ea7\u8f6c\u8ba9",  # 资产转让
     )
 
-    start_index: int | None = None
+    start_index: Optional[int] = None
     for index, line in enumerate(lines):
         if any(alias in line for alias in heading_aliases):
             start_index = index
@@ -4958,6 +4050,48 @@ def extract_special_values(
                     "html_text_regex",
                     0.88,
                 )
+
+    def apply_real_estate_extend() -> None:
+        if asset_group not in {"real_estate", "land"}:
+            return
+        if not isinstance(extend, dict):
+            return
+        # 从 extendInfoMap 中提取 real_estate/land 特有字段
+        _EXTEND_FIELD_MAP: Dict[str, Tuple[str, Tuple[str, ...]]] = {
+            "right_certificate_no": ("rightCertificateNo", ("rightCertificateNo", "rightCertificate", "certificateNo")),
+            "building_area": ("buildingArea", ("buildingArea", "buildingAreaSqm", "area")),
+            "property_use": ("propertyUse", ("propertyUse", "houseUse", "landUse", "useage")),
+            "property_location": ("propertyLocation", ("propertyLocation", "location", "address")),
+            "property_structure": ("propertyStructure", ("propertyStructure", "buildingStructure", "structure")),
+            "property_status": ("propertyStatus", ("propertyStatus", "status", "houseStatus")),
+            "property_type": ("propertyType", ("propertyType", "houseType", "type")),
+            "asset_highlights": ("assetHighlights", ("assetHighlights", "highlights", "advantage")),
+            "use_term": ("useTerm", ("useTerm", "termOfUse", "validTerm")),
+            "disclosed_defects": ("disclosedDefects", ("disclosedDefects", "defects", "riskWarning")),
+            "land_area": ("landArea", ("landArea", "area")),
+            "land_use": ("landUse", ("landUse", "useage")),
+            "land_location": ("landLocation", ("landLocation", "location", "address")),
+        }
+        for field_key, (primary_key, fallback_keys) in _EXTEND_FIELD_MAP.items():
+            if not is_blank(values.get(field_key)):
+                continue
+            val = first_non_blank(
+                *(extend.get(k) for k in (primary_key,) + fallback_keys)
+            )
+            if is_blank(val):
+                continue
+            val_str = compact_text(str(val))
+            if not val_str:
+                continue
+            values[field_key] = val_str
+            results[field_key] = field_result_value(
+                val_str,
+                "detail_json",
+                f"extendInfoMap.{primary_key}",
+                val_str,
+                "api",
+                0.92,
+            )
 
     def apply_debt_debtor_summary(
         *,
@@ -5278,6 +4412,7 @@ def extract_special_values(
                 results[field.key] = field_result_value(
                     None, "missing", "ai_batch_no_value", None, "not_found", 0.0
                 )
+        apply_real_estate_extend()
         apply_real_estate_rental_fallback()
         apply_use_term_fallback()
         apply_media_images()
@@ -5461,6 +4596,7 @@ def extract_special_values(
                     confidence=ai_confidence,
                 )
 
+    apply_real_estate_extend()
     apply_real_estate_rental_fallback()
     apply_use_term_fallback()
     apply_media_images()
@@ -5494,7 +4630,7 @@ def sync_common_special_values(
     )
 
 
-def format_time(value: Any) -> str | None:
+def format_time(value: Any) -> Optional[str]:
     """格式化时间"""
     if is_blank(value):
         return None
@@ -5511,7 +4647,7 @@ def format_time(value: Any) -> str | None:
     return dt.datetime.fromtimestamp(numeric).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def format_money(value: Any, display: Any = None) -> str | None:
+def format_money(value: Any, display: Any = None) -> Optional[str]:
     """格式化金额"""
     if not is_blank(display):
         return compact_text(display)
@@ -5545,7 +4681,7 @@ def deep_find(obj: Any, keys: Iterable[str]) -> Any:
     return None
 
 
-def join_address(value: Any) -> str | None:
+def join_address(value: Any) -> Optional[str]:
     """拼接地址"""
     def join_one(item: Dict[str, Any]) -> str:
         province = compact_text(item.get("province")) or ""
@@ -5585,7 +4721,7 @@ def join_address(value: Any) -> str | None:
 class JDAuctionScraper:
     """京东拍卖数据采集器"""
 
-    def __init__(self, db: JDScraperDatabase, client: JDClient) -> None:
+    def __init__(self, db: Any, client: JDClient) -> None:
         self.db = db
         self.client = client
 
@@ -5595,37 +4731,63 @@ class JDAuctionScraper:
         per_category_limit: int,
         output_dir: Path,
         categories: set[str] | None = None,
-        total_limit: int | None = None,
+        total_limit: Optional[int] = None,
+        mode: str = "sample",
+        ai_mode: str = "async",
     ) -> Dict[str, Any]:
         """采集样本数据"""
         self.db.init_schema()
         self.db.seed_field_catalog()
+        mode = mode if mode in ("sample", "full", "incremental") else "sample"
         batch_id = self.db.start_batch(
             {
                 "per_category_limit": per_category_limit,
                 "categories": sorted(categories or []),
                 "total_limit": total_limit,
+                "mode": mode,
             }
         )
         logger.info("batch_started", f"开始采集批次: {batch_id}", batch_id=batch_id)
         seen: set[str] = set()
         category_counts: Dict[str, int] = {}
         errors: List[Dict[str, str]] = []
+        skipped_existing = 0
+        existing_ids: set[str] = set()
+        known_fps: dict[str, str] = {}
+        fingerprint_rows: list[dict[str, Any]] = []
+        if mode == "incremental":
+            query_existing = getattr(self.db, "query_existing_source_item_ids", None)
+            query_fps = getattr(self.db, "query_list_fingerprints", None)
+            existing_ids = set(query_existing("jd") or []) if callable(query_existing) else set()
+            known_fps = dict(query_fps("jd") or {}) if callable(query_fps) else {}
+        has_baseline = bool(known_fps)
         try:
             for category in self.client.get_categories():
                 if total_limit is not None and len(seen) >= total_limit:
                     break
                 if categories and category.category_id not in categories:
                     continue
-                items, _total = self.client.search_items(category.category_id, page=1, page_size=per_category_limit)
-                category_counts[f"{category.category_id}-{category.name}"] = len(items)
-                logger.info(
-                    "category_processing",
-                    f"处理类目: {category.name} ({category.category_id}), 共 {len(items)} 条",
-                    category_id=category.category_id,
-                    category_name=category.name,
-                    item_count=len(items),
-                )
+                # 翻页采集：从第1页开始，直到无更多数据或达到每类上限
+                cat_items: list[Dict[str, Any]] = []
+                for page in range(1, 200):
+                    page_items, total = self.client.search_items(category.category_id, page=page, page_size=per_category_limit)
+                    if not page_items:
+                        break
+                    cat_items.extend(page_items)
+                    category_counts[f"{category.category_id}-{category.name}"] = len(page_items)
+                    logger.info(
+                        "category_processing",
+                        f"处理类目: {category.name} ({category.category_id}), "
+                        f"第{page}页获{len(page_items)}条, 累计{len(cat_items)}条",
+                        category_id=category.category_id,
+                        category_name=category.name,
+                        item_count=len(cat_items),
+                    )
+                    if total is not None and len(cat_items) >= total:
+                        break
+                    if page >= 5 and page_items and len(page_items) < per_category_limit:
+                        break
+                items = cat_items
                 for list_item in items[:per_category_limit]:
                     if total_limit is not None and len(seen) >= total_limit:
                         break
@@ -5633,8 +4795,39 @@ class JDAuctionScraper:
                     if not paimai_id or paimai_id in seen:
                         continue
                     seen.add(paimai_id)
+                    list_fp = self._list_fingerprint(list_item)
+                    fingerprint_rows.append(
+                        {
+                            "source_platform": "jd",
+                            "source_item_id": paimai_id,
+                            "fingerprint": list_fp,
+                            "updated_at": now_text(),
+                        }
+                    )
+                    if mode == "incremental" and paimai_id in existing_ids:
+                        known_fp = known_fps.get(paimai_id)
+                        unchanged = (known_fp is not None and known_fp == list_fp) or (
+                            known_fp is None and not has_baseline
+                        )
+                        if unchanged:
+                            skipped_existing += 1
+                            try:
+                                self.db.write_crawl_queue_item(
+                                    batch_id=batch_id,
+                                    source_platform="jd",
+                                    source_item_id=paimai_id,
+                                    project_name=first_non_blank(
+                                        list_item.get("title"),
+                                        list_item.get("name"),
+                                        list_item.get("projectName"),
+                                    ),
+                                    status="skipped",
+                                )
+                            except Exception:
+                                pass
+                            continue
                     try:
-                        self._crawl_one(batch_id, category, list_item, paimai_id)
+                        self._crawl_one(batch_id, category, list_item, paimai_id, ai_mode=ai_mode)
                     except Exception as exc:  # noqa: BLE001 - 单条失败不影响整个批次
                         logger.error(
                             "item_crawl_failed",
@@ -5644,8 +4837,27 @@ class JDAuctionScraper:
                             error=str(exc),
                         )
                         errors.append({"paimai_id": paimai_id, "category": category.category_id, "error": str(exc)})
+                        # 采集失败也写入标级队列, 供全量采集追溯与重跑
+                        try:
+                            self.db.write_crawl_queue_item(
+                                batch_id=batch_id,
+                                source_platform="jd",
+                                source_item_id=paimai_id,
+                                status="failed",
+                                error_message=str(exc)[:2000],
+                            )
+                        except Exception:
+                            pass
+            upsert_fps = getattr(self.db, "upsert_list_fingerprints", None)
+            if callable(upsert_fps):
+                upsert_fps(fingerprint_rows)
             status = "success" if not errors else "partial_success"
-            self.db.finish_batch(batch_id, status, safe_json_dumps(errors[:20]))
+            summary_payload = {
+                "errors": errors[:20],
+                "skipped_existing": skipped_existing,
+                "mode": mode,
+            }
+            self.db.finish_batch(batch_id, status, safe_json_dumps(summary_payload))
             logger.info(
                 "batch_finished",
                 f"批次完成: {batch_id}, 成功 {len(seen) - len(errors)}, 失败 {len(errors)}",
@@ -5668,15 +4880,45 @@ class JDAuctionScraper:
         return {
             "batch_id": batch_id,
             "items_seen": len(seen),
+            "skipped_existing": skipped_existing,
             "category_counts": category_counts,
             "errors": errors,
             "exports": {key: str(path) for key, path in exports.items()},
         }
 
-    def _crawl_one(self, batch_id: str, category: JDCategory, list_item: Dict[str, Any], paimai_id: str) -> None:
+    @staticmethod
+    def _list_fingerprint(list_item: Dict[str, Any]) -> str:
+        payload = {
+            key: list_item.get(key)
+            for key in (
+                "id",
+                "paimaiId",
+                "title",
+                "name",
+                "projectName",
+                "startPrice",
+                "startPriceStr",
+                "currentPrice",
+                "currentPriceStr",
+                "assessmentPriceCN",
+                "auctionStatus",
+                "auctionStartTime",
+                "auctionEndTime",
+                "productAddress",
+                "paimaiTimes",
+            )
+            if key in list_item
+        }
+        text = json.dumps(payload or list_item, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _crawl_one(self, batch_id: str, category: JDCategory, list_item: Dict[str, Any],
+                   paimai_id: str, ai_mode: str = "async") -> None:
         """采集单个标的"""
         logger.info("crawl_item_start", f"开始采集: {paimai_id}", paimai_id=paimai_id)
-        start_ai_batch_budget(paimai_id)
+        async_ai = ai_mode == "async"
+        if not async_ai:
+            start_ai_batch_budget(paimai_id)
         asset_group = classify_category(category)
         bundle = self.client.fetch_detail_bundle(paimai_id, list_item)
         core = bundle.get("core") or {}
@@ -5693,13 +4935,16 @@ class JDAuctionScraper:
         announcement_html = bundle.get("announcement_html") or ""
         parsed = extract_key_values_from_html(description_html)
         notice_parsed = extract_key_values_from_html("\n".join([notice_html, announcement_html]))
-        combined_ai_results = prefetch_combined_ai_results(
-            asset_group=asset_group,
-            parsed=parsed,
-            notice_parsed=notice_parsed,
-            paimai_id=paimai_id,
-            project_name=project_name,
-        )
+        if async_ai:
+            combined_ai_results = {}
+        else:
+            combined_ai_results = prefetch_combined_ai_results(
+                asset_group=asset_group,
+                parsed=parsed,
+                notice_parsed=notice_parsed,
+                paimai_id=paimai_id,
+                project_name=project_name,
+            )
 
         self.db.upsert_raw_payloads(
             paimai_id=paimai_id,
@@ -5771,9 +5016,32 @@ class JDAuctionScraper:
         if ocr_retry_task and hasattr(self.db, "enqueue_ocr_retry_task"):
             self.db.enqueue_ocr_retry_task(paimai_id=paimai_id, task=ocr_retry_task)
 
+        # 异步 AI 模式：将标的入队到 ai_enrichment_queue，不做同步 AI
+        if async_ai and hasattr(self.db, "enqueue_ai_enrichment_task"):
+            from multi_platform_runner import ai_context_to_payload
+            context = AIExtractionContext(
+                html_key_values={str(k): str(v) for k, v in (parsed.key_values or {}).items() if v},
+                detail_text=re.sub(r"<[^>]+>", " ", description_html or "")[:AI_DETAIL_TEXT_LIMIT],
+                notice_text=re.sub(r"<[^>]+>", " ", (notice_html or "") + "\n" + (announcement_html or ""))[:30000],
+                image_urls=[],
+                asset_group=asset_group,
+                paimai_id=paimai_id,
+            )
+            self.db.enqueue_ai_enrichment_task(
+                paimai_id=paimai_id,
+                source_platform="jd",
+                source_item_id=paimai_id,
+                asset_group=asset_group,
+                context=ai_context_to_payload(context),
+                task_type="field_enrichment",
+                priority=100,
+                reason="main crawl wrote item first; queued AI enrichment",
+            )
+
         logger.info("crawl_item_success", f"采集完成: {paimai_id}", paimai_id=paimai_id)
 
-        clear_ai_batch_budget(paimai_id)
+        if not async_ai:
+            clear_ai_batch_budget(paimai_id)
 
 
 def parse_args() -> argparse.Namespace:
@@ -5783,12 +5051,10 @@ def parse_args() -> argparse.Namespace:
     crawl = subparsers.add_parser("crawl", help="采集样本或正式数据")
     crawl.add_argument("--per-category-limit", type=int, default=2, help="每个京东一级类目最多采集多少条 (默认: 2)")
     crawl.add_argument("--output-dir", type=Path, default=Path("outputs") / "latest", help="输出目录 (默认: outputs/latest)")
-    crawl.add_argument("--db-path", type=Path, default=None, help="SQLite 路径，默认在输出目录下")
-    crawl.add_argument("--storage-backend", choices=("mysql", "sqlite"), default="mysql", help="存储后端：mysql 或 sqlite (默认: mysql)")
     crawl.add_argument("--mysql-host", default="127.0.0.1", help="MySQL 主机 (默认: 127.0.0.1)")
     crawl.add_argument("--mysql-port", type=int, default=3306, help="MySQL 端口 (默认: 3306)")
-    crawl.add_argument("--mysql-user", default=os.getenv("MYSQL_USER", ""), help="MySQL 用户 (默认: 环境变量 MYSQL_USER 或空)")
-    crawl.add_argument("--mysql-password", default=os.getenv("MYSQL_PASSWORD", ""), help="MySQL 密码 (默认: 环境变量 MYSQL_PASSWORD 或空)")
+    crawl.add_argument("--mysql-user", default=os.getenv("MYSQL_USER", "root"), help="MySQL 用户 (默认: 环境变量 MYSQL_USER 或 root)")
+    crawl.add_argument("--mysql-password", default=os.getenv("MYSQL_PASSWORD", "root"), help="MySQL 密码 (默认: 环境变量 MYSQL_PASSWORD 或 root)")
     crawl.add_argument("--mysql-database", default=os.getenv("MYSQL_DATABASE", "auction_data"), help="MySQL 数据库 (默认: 环境变量 MYSQL_DATABASE 或 auction_data)")
     crawl.add_argument("--reset-db", action="store_true", help="采集前删除并重建当前 MySQL 正式表；仅用于测试环境")
     crawl.add_argument("--confirm-reset-db", action="store_true", help="与 --reset-db 同时使用，确认执行删除重建表")
@@ -5836,34 +5102,28 @@ def main() -> None:
         # 初始化 AI 提取器（如果配置了）
         output_dir = args.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
-        db_path = args.db_path or output_dir / "jd_auction.sqlite"
         categories = {part.strip() for part in args.categories.split(",") if part.strip()} or None
         storage_info: Dict[str, Any]
-        mysql_config = None
-        if args.storage_backend == "mysql":
-            from jd_mysql_store import MySQLConfig, MySQLJDScraperDatabase, reset_mysql_tables
+        from jd_mysql_store import MySQLConfig, MySQLJDScraperDatabase, reset_mysql_tables
 
-            mysql_config = MySQLConfig(
-                host=args.mysql_host,
-                port=args.mysql_port,
-                user=args.mysql_user,
-                password=args.mysql_password,
-                database=args.mysql_database,
-            )
-            if args.reset_db and not args.confirm_reset_db:
-                raise SystemExit("--reset-db 会删除并重建 MySQL 表，请同时添加 --confirm-reset-db 确认")
-            if args.reset_db:
-                reset_mysql_tables(mysql_config)
-            db = MySQLJDScraperDatabase(mysql_config)
-            storage_info = {
-                "storage_backend": "mysql",
-                "mysql_host": args.mysql_host,
-                "mysql_port": args.mysql_port,
-                "mysql_database": args.mysql_database,
-            }
-        else:
-            db = JDScraperDatabase(db_path)
-            storage_info = {"storage_backend": "sqlite", "db_path": str(db_path)}
+        mysql_config = MySQLConfig(
+            host=args.mysql_host,
+            port=args.mysql_port,
+            user=args.mysql_user,
+            password=args.mysql_password,
+            database=args.mysql_database,
+        )
+        if args.reset_db and not args.confirm_reset_db:
+            raise SystemExit("--reset-db 会删除并重建 MySQL 表，请同时添加 --confirm-reset-db 确认")
+        if args.reset_db:
+            reset_mysql_tables(mysql_config)
+        db = MySQLJDScraperDatabase(mysql_config)
+        storage_info = {
+            "storage_backend": "mysql",
+            "mysql_host": args.mysql_host,
+            "mysql_port": args.mysql_port,
+            "mysql_database": args.mysql_database,
+        }
         init_ai_extractor(
             model=args.ai_provider or args.ai_model,
             api_key=args.ai_api_key,
@@ -5878,7 +5138,6 @@ def main() -> None:
             "crawl_start",
             "开始采集",
             output_dir=str(output_dir),
-            db_path=str(db_path),
             storage_backend=args.storage_backend,
             per_category_limit=args.per_category_limit,
             ai_enabled=ai_extractor is not None,
@@ -5892,7 +5151,6 @@ def main() -> None:
         logger.info(
             "crawl_finish",
             "采集完成",
-            db_path=str(db_path),
             storage_backend=args.storage_backend,
             batch_id=summary.get("batch_id"),
             items_seen=summary.get("items_seen"),
@@ -5902,4 +5160,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

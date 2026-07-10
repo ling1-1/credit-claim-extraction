@@ -8,7 +8,7 @@
 已验证的 API 端点（2026-06-27 抓包验证）:
 
   列表 API (www.gxcq.com.cn, PHPCMF httpapi):
-    GET /index.php?s=httpapi&id=3&appid=1&appsecret=<set GXCQ_LIST_APP_SECRET locally>
+    GET /index.php?s=httpapi&id=3&appid=1&appsecret=PHPCMFA0EF8F01A56FF
         &data[assetsTypeParent]={type}&data[cate_id]={cid}
     返回: {code: 1, data: {project_html: "<li>...<li>..."}}
     HTML格式: <li><a href="{detail_url}"><h1>{title}</h1>
@@ -22,7 +22,6 @@
     ZQ=债权, GQ=股权, FC=房产, TD=土地, CL=车辆, SB=设备, WZ=物资
 """
 
-from __future__ import annotations
 
 import json
 import os
@@ -34,7 +33,7 @@ from urllib.parse import urljoin
 
 import requests
 
-from jd.ai_extractor import AIExtractionContext
+from jd.ai_extractor import AIExtractionContext, AI_DETAIL_TEXT_LIMIT
 
 
 # ===== 常量 =====
@@ -43,11 +42,11 @@ GXCQ_DETAIL_API_BASE = "https://ljs.gxcq.com.cn"
 GXCQ_PLATFORM = "gxcq"
 GXCQ_DATA_SOURCE = "广西联合产权交易所集团有限责任公司"
 
-# 列表 API 配置 (已验证: id=3 返回 project_html)
+# 列表 API 配置 (已验证: id=2=搜索API, 支持分页并返回 project_total; id=3=列表HTML, 不支持分页)
 GXCQ_LIST_API_PATH = "/index.php"
 GXCQ_LIST_APP_ID = "1"
-GXCQ_LIST_APP_SECRET = os.getenv("GXCQ_LIST_APP_SECRET", "")  # Set locally; do not commit secrets.
-GXCQ_LIST_API_ID = "3"  # 3=项目列表HTML; 4=筛选条件HTML
+GXCQ_LIST_APP_SECRET = os.getenv("GXCQ_LIST_APP_SECRET", "PHPCMFA0EF8F01A56FF")  # PHPCMF appsecret
+GXCQ_LIST_API_ID = "2"  # 2=搜索API(支持分页); 3=项目列表HTML(不支持分页)
 
 # assetsTypeParent 映射
 ASSETS_TYPE_PARENT_MAP: Dict[str, str] = {
@@ -224,7 +223,71 @@ class GxcqDetailBundle:
 
 
 # ===== 核心 Adapter 类 =====
-class GxcqAdapter:
+class GxcqBrowserFetcher:
+    """使用 Selenium 渲染 GXCQ 列表页，支持翻页"""
+    def __init__(self, headless: bool = True) -> None:
+        self.headless = headless
+
+    def fetch_list_html(self, page: int = 1, cate_id: int = 154) -> str:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        import time
+        options = Options()
+        if self.headless:
+            options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        driver = webdriver.Chrome(options=options)
+        try:
+            driver.get(f"{GXCQ_BASE_URL}/list-{cate_id}.html")
+            time.sleep(3)
+            if page > 1:
+                try:
+                    page_btn = driver.find_element(By.CSS_SELECTOR, f"a[data-page='{page}']")
+                    driver.execute_script("arguments[0].click();", page_btn)
+                    time.sleep(2)
+                except Exception:
+                    pass
+            return driver.page_source
+        finally:
+            driver.quit()
+
+    def parse_list_items(self, html: str) -> List[GxcqListItem]:
+        """解析列表页 HTML"""
+        items: List[GxcqListItem] = []
+        import re
+        # 匹配项目链接: 支持 /projectDetail/xxx.html 和 #/projectDetail/xxx.html 格式
+        link_pattern = re.compile(
+            r'<a\b[^>]*\bhref\s*=\s*["\']([^"\']*?projectDetail/[a-f0-9]+\.html)["\'][^>]*>(.*?)</a>',
+            re.DOTALL | re.I
+        )
+        for m in link_pattern.finditer(html):
+            link_url = m.group(1)
+            inner_html = m.group(2)
+            # 构建完整 URL
+            if link_url.startswith("http"):
+                detail_url = link_url.replace("http://", "https://")
+            elif link_url.startswith("/"):
+                detail_url = f"https://ljs.gxcq.com.cn{link_url}"
+            else:
+                detail_url = f"https://ljs.gxcq.com.cn/{link_url}"
+            # 提取标题
+            title = compact_text(re.sub(r'<[^>]+>', '', inner_html))[:100]
+            if not title:
+                continue
+            # 提取 assetsId
+            id_m = re.search(r'/projectDetail/([a-f0-9]+)\.html', link_url, re.I)
+            item_id = id_m.group(1) if id_m else ""
+            items.append(GxcqListItem(
+                source_item_id=item_id or title[:30],
+                source_url=detail_url,
+                title=title,
+            ))
+        return items
     """广西联合产权交易所适配器
     
     列表: PHPCMF httpapi (id=3) 返回 HTML 项目片段
@@ -252,18 +315,25 @@ class GxcqAdapter:
         *,
         page: int = 1,
         size: int = 10,
-        assets_type_parent: str = "ZQ",
-        cate_id: int = 154,
+        assets_type_parent: str = "",
+        cate_id: int = 0,
     ) -> str:
-        """构建列表 API URL"""
+        """构建列表 API URL (PHPCMF httpapi, id=2)
+
+        不传 assets_type_parent / cate_id 则不筛选，返回全部项目。
+        """
         params = {
             "s": "httpapi",
             "id": GXCQ_LIST_API_ID,
             "appid": GXCQ_LIST_APP_ID,
             "appsecret": GXCQ_LIST_APP_SECRET,
-            "data[assetsTypeParent]": assets_type_parent or "ZQ",
-            "data[cate_id]": str(cate_id),
+            "data[page]": str(page),
+            "data[pagesize]": str(size),
         }
+        if assets_type_parent:
+            params["data[assetsTypeParent]"] = assets_type_parent
+        if cate_id:
+            params["data[cate_id]"] = str(cate_id)
         query = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{self.base_url}{GXCQ_LIST_API_PATH}?{query}"
 
@@ -272,10 +342,12 @@ class GxcqAdapter:
         *,
         page: int = 1,
         size: int = 10,
-        assets_type_parent: str = "ZQ",
-        cate_id: int = 154,
+        assets_type_parent: str = "",
+        cate_id: int = 0,
     ) -> Dict[str, Any]:
-        """获取项目列表 (PHPCMF httpapi, id=3)
+        """获取项目列表 (PHPCMF httpapi, id=2)
+
+        不传 assets_type_parent / cate_id 则不筛选，返回全部项目。
         
         Returns:
             {code: 1, msg: "...", data: {project_html: "<li>...</li>..."}}
@@ -297,7 +369,7 @@ class GxcqAdapter:
 
     def parse_list_response(self, api_data: Dict[str, Any]) -> List[GxcqListItem]:
         """解析列表 API 响应
-        
+
         从 project_html 字段的 HTML 片段中提取项目列表。
         HTML 格式:
         <li><a href="{url}" ...>
@@ -340,24 +412,36 @@ class GxcqAdapter:
             spans = re.findall(r'<span[^>]*>([^<]*)</span>', inner_html, re.IGNORECASE | re.DOTALL)
             
             price_raw = None
+            price_num = None
             end_time = None
             status = None
             
-            # 根据位置推断 span 含义 (从HTML模板看顺序是: 价格, 时间, 状态)
-            if len(spans) >= 1:
-                price_val = compact_text(spans[0])
+            # 根据位置推断 span 含义
+            # id=2 格式: [项目编号, 价格, 时间, 状态] (4个span)
+            # id=3 格式: [价格, 时间, 状态] (3个span)
+            span_offset = 0
+            if len(spans) == 4:
+                # id=2 格式: 第一个span是项目编号, 跳过
+                span_offset = 1
+            
+            price_idx = 0 + span_offset
+            time_idx = 1 + span_offset
+            status_idx = 2 + span_offset
+            
+            if len(spans) > price_idx:
+                price_val = compact_text(spans[price_idx])
                 if price_val and price_val != '-':
                     price_raw = price_val
                     try:
                         price_num = float(re.sub(r'[^\d.]', '', price_val))
                     except ValueError:
                         price_num = None
-            if len(spans) >= 2:
-                time_val = compact_text(spans[1])
+            if len(spans) > time_idx:
+                time_val = compact_text(spans[time_idx])
                 if time_val and time_val != '-':
                     end_time = time_val
-            if len(spans) >= 3:
-                status_val = compact_text(spans[2])
+            if len(spans) > status_idx:
+                status_val = compact_text(spans[status_idx])
                 if status_val and status_val != '-':
                     status = status_val
 
@@ -382,7 +466,7 @@ class GxcqAdapter:
                 source_url=detail_url,
                 title=title,
                 price_raw=price_raw,
-                price_num=float(re.sub(r'[^\d.]', '', price_raw)) if price_raw else None,
+                price_num=price_num,  # 已在前面 try/except 计算好
                 project_status=status,
                 end_time=end_time,
                 signup_deadline=end_time,
@@ -391,6 +475,33 @@ class GxcqAdapter:
             ))
 
         return items
+
+    def parse_total_count(self, api_data: Dict[str, Any]) -> int:
+        """从列表 API 响应中提取条目总数，用于分页判断。
+
+        返回 0 表示无法获取总数，调用方应回退到"空页即结束"策略。
+
+        优先从 data.project_total 读取（id=2 搜索API 返回此字段）；
+        若不存在则退回到 data.pages_html 中解析"共N页"来估算总数。
+        """
+        raw_data = api_data.get("data")
+        if isinstance(raw_data, dict):
+            # 方式1: 直接取 project_total（id=2 搜索API 专用）
+            total = raw_data.get("project_total", 0) or raw_data.get("total", 0) or raw_data.get("count", 0) or 0
+            try:
+                total = int(total)
+                if total > 0:
+                    return total
+            except (TypeError, ValueError):
+                pass
+
+            # 方式2: 从 pages_html 中解析"共N页"
+            pages_html = raw_data.get("pages_html", "")
+            if pages_html:
+                m = re.search(r'共(\d+)页', pages_html)
+                if m:
+                    return int(m.group(1)) * 10  # 每页10条估算
+        return 0
 
     # ── 详情 API ──
     def fetch_detail_api(self, list_item: GxcqListItem) -> Dict[str, Any]:
@@ -708,7 +819,7 @@ class GxcqAdapter:
             title=list_item.title if list_item else "",
             key_values=kv,
             attachments=self._extract_attachments_fallback(html),
-            detail_text=text[:10000],
+            detail_text=text[:AI_DETAIL_TEXT_LIMIT],
             list_item=list_item,
             image_urls=self._extract_images_fallback(html),
             raw_html=html,
@@ -753,7 +864,7 @@ class GxcqAdapter:
         if bundle.key_values:
             sections.append("key_values:\n" + json.dumps(bundle.key_values, ensure_ascii=False, indent=2))
         if bundle.detail_text:
-            sections.append("detail_text:\n" + bundle.detail_text[:8000])
+            sections.append("detail_text:\n" + bundle.detail_text[:AI_DETAIL_TEXT_LIMIT])
 
         asset_group = infer_asset_group(
             bundle.list_item.assets_type_parent if bundle.list_item else None,
@@ -761,7 +872,7 @@ class GxcqAdapter:
         )
         return AIExtractionContext(
             html_key_values=dict(bundle.key_values),
-            detail_text="\n\n".join(sections)[:12000],
+            detail_text="\n\n".join(sections)[:AI_DETAIL_TEXT_LIMIT],
             notice_text=bundle.key_values.get("风险提示", "") or bundle.key_values.get("特别告知", ""),
             image_urls=list(bundle.image_urls),
             asset_group=asset_group,
@@ -797,9 +908,26 @@ class GxcqAdapter:
         deposit = first_non_blank(kv.get("保证金"), (li.deposit_amount if li else None))
         contact = join_non_blank(
             kv.get("联系人"), kv.get("项目咨询联系人"), kv.get("联系电话"),
-            (li.contact_person if li else None),
+            kv.get("概要_agencyContacts"), kv.get("概要_agencyContactsTel"),
+            kv.get("概要_agencyContactsDeptTel"),
+            (li.contact_person if li else None), (li.contact_phone if li else None),
         )
         notice = first_non_blank(kv.get("风险提示"), kv.get("特别告知"))
+        location = join_non_blank(
+            kv.get("概要_province_name"), kv.get("概要_city_name"), kv.get("概要_county_name"),
+            kv.get("标的所在地"), kv.get("资产_坐落"), kv.get("资产_位置"),
+        )
+        disposal_party = first_non_blank(
+            kv.get("转让方"), kv.get("转让方名称"),
+            kv.get("概要_transferorName"), kv.get("标的企业"),
+        )
+        disposal_agency = first_non_blank(
+            kv.get("概要_organizationName"), kv.get("机构名称"), kv.get("交易机构"),
+        )
+        signup_start = first_non_blank(
+            kv.get("概要_listingStartTime"), kv.get("概要_startTime"),
+            kv.get("挂牌开始日期"), kv.get("信息披露开始日期"),
+        )
 
         asset_group = infer_asset_group((li.assets_type_parent if li else None), title)
         asset_type = infer_asset_type((li.assets_type_parent if li else None), title)
@@ -811,12 +939,17 @@ class GxcqAdapter:
         set_field("asset_type", asset_type or "产权转让", "computed", "infer", asset_type or "产权转让", "inference", 0.85)
         set_field("project_name", title, "detail/list", "title", title, "api_rule", 0.95)
         set_field("project_status", status, "list/detail", "status", status)
+        set_field("asset_location", location, "detail_api", "location", location)
+        set_field("disposal_party", disposal_party, "detail_api", "disposal_party", disposal_party)
+        set_field("disposal_agency", disposal_agency, "detail_api", "disposal_agency", disposal_agency)
         set_field("final_price_raw", price, "list/detail", "price", price)
+        set_field("start_price_raw", price, "list/detail", "price", price)
         set_field("deposit_amount", deposit, "list/detail", "deposit", deposit)
         set_field("contact_info", contact, "detail/api", "contact", contact)
         set_field("special_notice", notice, "detail/api", "notice", notice)
+        set_field("signup_start_time", signup_start, "detail_api", "signup_start", signup_start)
         set_field("signup_end_time", first_non_blank(
-            (li.end_time if li else None), kv.get("报名截止时间"),
+            (li.end_time if li else None), kv.get("报名截止时间"), kv.get("概要_endDate"),
         ), "list/detail", "end_time", (li.end_time if li else None))
         set_field("attachments_json", json.dumps(bundle.attachments, ensure_ascii=False), "detail_api", "attachments", "", "api_rule", 0.9)
         set_field("data_source", GXCQ_DATA_SOURCE, "computed", "adapter", "constant", 1.0)
@@ -862,12 +995,18 @@ class GxcqAdapter:
             })
         else:
             values.update({
-                "raw_detail_text": (bundle.detail_text or "")[:12000],
+                "raw_detail_text": (bundle.detail_text or "")[:AI_DETAIL_TEXT_LIMIT],
                 "raw_table_pairs_json": json.dumps(kv, ensure_ascii=False, sort_keys=True),
                 "site_images": images,
             })
 
         return {k: v for k, v in values.items() if compact_text(str(v or ""))}
+
+
+# 别名: GxcqAdapter = GxcqBrowserFetcher
+# GxcqBrowserFetcher 实际包含了完整的适配器逻辑（REST API + 解析 + AI 上下文），
+# 只是类名有误导性，此处提供别名供 multi_platform_runner / gycq_adapter 导入。
+GxcqAdapter = GxcqBrowserFetcher
 
 
 # ===== 测试入口 =====

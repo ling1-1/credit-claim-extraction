@@ -1,9 +1,9 @@
 """Platform adapters for auction data sources."""
 
-from __future__ import annotations
 
 __all__ = [
     "ali_adapter",
+    "cbex_adapter",
     "cquae_adapter",
     "ejy365_adapter",
     "gxcq_adapter",

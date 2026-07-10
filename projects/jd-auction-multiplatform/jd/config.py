@@ -1,8 +1,7 @@
-from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass
@@ -22,13 +21,13 @@ class CrawlConfig:
 @dataclass
 class LogConfig:
     log_level: str = "INFO"
-    log_file: Path | None = None
+    log_file: Optional[Path] = None
     console_output: bool = True
 
 
 @dataclass
 class AIConfig:
-    # `model` is kept as a legacy provider selector: qwen/deepseek/openai.
+    # `model` selects the provider family: qwen/deepseek/openai.
     active_profile: str = ""
     model: str = ""
     model_name: str = ""
@@ -46,17 +45,11 @@ class AIConfig:
 
 
 @dataclass
-class DatabaseConfig:
-    default_db_name: str = "jd_auction.sqlite"
-
-
-@dataclass
 class Config:
     api: APIConfig = field(default_factory=APIConfig)
     crawl: CrawlConfig = field(default_factory=CrawlConfig)
     log: LogConfig = field(default_factory=LogConfig)
     ai: AIConfig = field(default_factory=AIConfig)
-    db: DatabaseConfig = field(default_factory=DatabaseConfig)
 
     def update_from_dict(self, config_dict: dict[str, Any]) -> None:
         for section_name, section_values in config_dict.items():
@@ -68,7 +61,7 @@ class Config:
                     setattr(section, key, value)
 
 
-_global_config: Config | None = None
+_global_config: Optional[Config] = None
 
 
 def get_config() -> Config:

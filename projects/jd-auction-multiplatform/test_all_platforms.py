@@ -17,7 +17,7 @@ def safe_print(msg):
     msg = str(msg).replace('\u200c', '').replace('\u200d', '')
     print(msg)
 
-def test_url(name, url, headers=None, params=None, is_json=False):
+def check_url(name, url, headers=None, params=None, is_json=False):
     h = {**HEADERS_COMMON, **(headers or {})}
     try:
         if params:
@@ -67,7 +67,7 @@ tpre_h = {
     "systemcode": "PROPERTY_RIGHT_TRANSFER_WEB",
     "uniflowsystemcode": "INFORMATIONIZE",
 }
-ok, data = test_url("TPRE-List", "https://trade.tpre.cn/up/biz/project/anmuas/equity-trading/page",
+ok, data = check_url("TPRE-List", "https://trade.tpre.cn/up/biz/project/anmuas/equity-trading/page",
          headers=tpre_h, params={"current": 1, "size": 2}, is_json=True)
 
 # ===== PreChina URLs =====
@@ -77,7 +77,7 @@ prechina_tests = [
     ("ejygg首页", "https://www.prechina.net/ejygg/index.jhtml"),
 ]
 for name, url in prechina_tests:
-    test_url(name, url)
+    check_url(name, url)
 
 # ===== GXCQ URLs =====
 safe_print("\n" + "="*60 + "\n3. GXCQ (广西)\n" + "="*60)
@@ -85,7 +85,7 @@ gxcq_tests = [
     ("首页", "https://www.gxcq.com.cn/"),
 ]
 for name, url in gxcq_tests:
-    test_url(name, url)
+    check_url(name, url)
 
 # ===== More API guesses =====
 safe_print("\n" + "="*60 + "\n4. API Guesses\n" + "="*60)
@@ -94,6 +94,6 @@ api_tests = [
     ("PreChina-ejygg-List", "https://www.prechina.net/ejygg/zczr/list.jhtml", {"pageNo": 1}),
 ]
 for name, url, params in api_tests:
-    test_url(name, url, params=params)
+    check_url(name, url, params=params)
 
 safe_print("\nDone!")

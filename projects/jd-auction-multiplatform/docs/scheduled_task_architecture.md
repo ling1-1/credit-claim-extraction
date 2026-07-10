@@ -75,7 +75,7 @@
 ```
 任务名称: AuctionCrawler-Daily-JD
 触发器: 每天 08:00（按需调整）
-操作: python jd_scraper_v2.py crawl --per-category-limit 20 --storage-backend mysql
+操作: python jd_scraper_v2.py crawl --per-category-limit 20
 
 任务名称: AuctionCrawler-Daily-Other
 触发器: 每天 08:30
@@ -114,7 +114,7 @@
 | `jd_scraper_v2.py` | `crawl` | 采集京东拍卖数据 |
 | `multi_platform_runner.py` | `crawl` | 采集阿里/重庆产权/e交易数据 |
 | `multi_platform_runner.py` | `ai-enrich` | 消费 `ai_enrichment_queue` 执行异步 AI 提取 |
-| `jd_mysql_store.py` | （sync） | SQLite → MySQL 数据迁移 |
+| `jd_mysql_store.py` | `schema/store` | MySQL V2 schema and storage layer |
 
 每个 CLI 命令是一个独立进程，执行完毕后正常退出。**无守护进程、无常驻内存**。
 
@@ -537,7 +537,7 @@ WHERE queue_status='running' AND locked_at < DATE_SUB(NOW(), INTERVAL 2 HOUR);
 2. 触发器 → 每日，开始时间 08:00
 3. 操作 → 启动程序
    程序或脚本: C:\Users\AppData\Local\Programs\Python\Python311\python.exe
-   添加参数: f:\codex_project\jd\jd_scraper_v2.py crawl --per-category-limit 20 --storage-backend mysql
+   添加参数: f:\codex_project\jd\jd_scraper_v2.py crawl --per-category-limit 20
    起始于: f:\codex_project\jd
 4. 设置 → 允许任务按需运行
 5. 设置 → 如果任务失败，重启每隔 5 分钟，最多 3 次
@@ -576,7 +576,7 @@ multi_platform_runner.py              jd_scraper_v2.py              jd_mysql_sto
 │    │  └─ process_ai.. │        │                      │        │  upsert_*_details()   │
 │    └─ handlers        │        │  JDAuctionScraper    │        │                       │
 │       ├─ Ejy365Live.. │        │  JDClient            │        │  MySQLJDScraperDB     │
-│       ├─ CquaeLive..  │        │  JDScraperDatabase   │        │                       │
+│       ├─ CquaeLive..  │        │  MySQLJDScraperDatabase   │        │                       │
 │       └─ AliLiveHandl │        └──────────────────────┘        └───────────────────────┘
 └───────────────────────┘
 ```

@@ -18,7 +18,7 @@ class AIConfigTests(unittest.TestCase):
                 "\n".join(
                     [
                         "AI_ACTIVE_PROFILE=deepseek",
-                        "AI_DEEPSEEK_API_KEY=dummy-test-deepseek",
+                        "AI_DEEPSEEK_API_KEY=sk-test-deepseek",
                         "AI_DEEPSEEK_MODEL_NAME=deepseek-chat",
                         "AI_DEEPSEEK_BASE_URL=https://api.deepseek.com",
                     ]
@@ -33,14 +33,14 @@ class AIConfigTests(unittest.TestCase):
         self.assertEqual(resolved.profile_name, "deepseek")
         self.assertEqual(resolved.provider, "deepseek")
         self.assertEqual(resolved.model_name, "deepseek-chat")
-        self.assertEqual(resolved.api_key, "dummy-test-deepseek")
+        self.assertEqual(resolved.api_key, "sk-test-deepseek")
         self.assertEqual(resolved.base_url, "https://api.deepseek.com")
 
     def test_mysql_profile_uses_env_named_secret_and_beats_dotenv(self):
         env = {
             "AI_ACTIVE_PROFILE": "qwen",
-            "AI_QWEN_API_KEY": "dummy-qwen-env",
-            "DEEPSEEK_PROD_KEY": "dummy-deepseek-from-env-var",
+            "AI_QWEN_API_KEY": "sk-qwen-env",
+            "DEEPSEEK_PROD_KEY": "sk-deepseek-from-env-var",
         }
         mysql_profile = {
             "profile_name": "prod_deepseek",
@@ -56,18 +56,18 @@ class AIConfigTests(unittest.TestCase):
         self.assertEqual(resolved.profile_name, "prod_deepseek")
         self.assertEqual(resolved.provider, "deepseek")
         self.assertEqual(resolved.model_name, "deepseek-v4-flash")
-        self.assertEqual(resolved.api_key, "dummy-deepseek-from-env-var")
+        self.assertEqual(resolved.api_key, "sk-deepseek-from-env-var")
 
     def test_cli_values_override_mysql_and_env(self):
         env = {
             "AI_ACTIVE_PROFILE": "deepseek",
-            "AI_DEEPSEEK_API_KEY": "dummy-deepseek-env",
+            "AI_DEEPSEEK_API_KEY": "sk-deepseek-env",
         }
         mysql_profile = {
             "profile_name": "prod_deepseek",
             "provider": "deepseek",
             "model_name": "deepseek-chat",
-            "api_key_value": "dummy-deepseek-mysql",
+            "api_key_value": "sk-deepseek-mysql",
             "enabled": 1,
         }
 
@@ -78,7 +78,7 @@ class AIConfigTests(unittest.TestCase):
                 "profile_name": "cli_qwen",
                 "provider": "qwen",
                 "model_name": "qwen-plus",
-                "api_key": "dummy-qwen-cli",
+                "api_key": "sk-qwen-cli",
                 "base_url": "https://dashscope.aliyuncs.com",
             },
         )
@@ -86,7 +86,7 @@ class AIConfigTests(unittest.TestCase):
         self.assertEqual(resolved.profile_name, "cli_qwen")
         self.assertEqual(resolved.provider, "qwen")
         self.assertEqual(resolved.model_name, "qwen-plus")
-        self.assertEqual(resolved.api_key, "dummy-qwen-cli")
+        self.assertEqual(resolved.api_key, "sk-qwen-cli")
 
     def test_empty_cli_values_do_not_override_mysql_profile(self):
         mysql_profile = {
@@ -94,7 +94,7 @@ class AIConfigTests(unittest.TestCase):
             "provider": "deepseek",
             "model_name": "deepseek-chat",
             "base_url": "https://api.deepseek.com",
-            "api_key_value": "dummy-from-mysql",
+            "api_key_value": "sk-from-mysql",
             "timeout_seconds": 30,
             "max_retries": 2,
             "qps": 3,
@@ -110,7 +110,7 @@ class AIConfigTests(unittest.TestCase):
         self.assertEqual(resolved.source, "mysql")
         self.assertEqual(resolved.provider, "deepseek")
         self.assertEqual(resolved.model_name, "deepseek-chat")
-        self.assertEqual(resolved.api_key, "dummy-from-mysql")
+        self.assertEqual(resolved.api_key, "sk-from-mysql")
         self.assertEqual(resolved.timeout, 30)
         self.assertEqual(resolved.max_retries, 2)
         self.assertEqual(resolved.qps, 3)
@@ -140,7 +140,7 @@ class AIConfigTests(unittest.TestCase):
 
         extractor = AIFieldExtractor(
             provider="deepseek",
-            api_key="dummy-test",
+            api_key="sk-test",
             model_name="deepseek-v4-flash",
         )
         fake_client = FakeClient()

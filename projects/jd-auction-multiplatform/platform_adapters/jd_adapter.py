@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
@@ -53,6 +52,8 @@ class JDPlatformAdapter:
         output_dir: str | Path,
         categories: set[str] | None = None,
         total_limit: int | None = None,
+        mode: str = "sample",
+        ai_mode: str = "async",
     ) -> dict[str, Any]:
         scraper = self.create_scraper(db)
         return scraper.crawl_sample(
@@ -60,6 +61,8 @@ class JDPlatformAdapter:
             output_dir=Path(output_dir),
             categories=categories,
             total_limit=total_limit,
+            mode=mode,
+            ai_mode=ai_mode,
         )
 
 

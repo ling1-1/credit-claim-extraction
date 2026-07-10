@@ -2,13 +2,12 @@
 字段标准化引擎
 统一金额、日期、面积、电话等字段的输出格式
 """
-from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Optional
 
 from .logger import get_logger
 
@@ -19,7 +18,7 @@ logger = get_logger()
 class StandardizedMoney:
     """标准化后的金额结果"""
     raw_value: str
-    numeric: Decimal | None
+    numeric: Optional[Decimal]
     unit: str  # 元, 万元, 亿元
     currency: str  # CNY, USD 等
     display: str  # 格式化显示字符串
@@ -30,11 +29,11 @@ class StandardizedMoney:
 class StandardizedDate:
     """标准化后的日期结果"""
     raw_value: str
-    iso_date: str | None  # YYYY-MM-DD
-    iso_datetime: str | None  # YYYY-MM-DD HH:MM:SS
-    year: int | None
-    month: int | None
-    day: int | None
+    iso_date: Optional[str]  # YYYY-MM-DD
+    iso_datetime: Optional[str]  # YYYY-MM-DD HH:MM:SS
+    year: Optional[int]
+    month: Optional[int]
+    day: Optional[int]
     display: str
     confidence: float
 
@@ -43,9 +42,9 @@ class StandardizedDate:
 class StandardizedArea:
     """标准化后的面积结果"""
     raw_value: str
-    numeric: Decimal | None
+    numeric: Optional[Decimal]
     unit: str  # ㎡, 平方米, 亩, 公顷
-    sqm_equivalent: Decimal | None  # 换算为平方米
+    sqm_equivalent: Optional[Decimal]  # 换算为平方米
     display: str
     confidence: float
 
@@ -112,7 +111,7 @@ class MoneyStandardizer:
                 confidence=0.0,
             )
 
-        numeric: Decimal | None = None
+        numeric: Optional[Decimal] = None
         unit = "元"
         currency = "CNY"
         confidence = 0.0
@@ -212,7 +211,7 @@ class DateStandardizer:
         # 清理中文日期格式
         cleaned = cls._clean_chinese_date(raw)
 
-        parsed_dt: datetime | None = None
+        parsed_dt: Optional[datetime] = None
         confidence = 0.0
 
         # 尝试各种格式解析
@@ -298,7 +297,7 @@ class AreaStandardizer:
                 confidence=0.0,
             )
 
-        numeric: Decimal | None = None
+        numeric: Optional[Decimal] = None
         unit = "㎡"
         confidence = 0.0
 
@@ -464,7 +463,7 @@ class FieldStandardizer:
         return PhoneStandardizer.standardize(value)
 
     @staticmethod
-    def auto_detect(value: str, field_name: str | None = None) -> Any:
+    def auto_detect(value: str, field_name: Optional[str] = None) -> Any:
         """根据字段名自动检测并标准化"""
         if not value:
             return value

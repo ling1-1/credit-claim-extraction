@@ -12,11 +12,14 @@ from multi_platform_runner import (
     JdLiveHandler,
     MultiPlatformRunner,
     PlatformRecord,
+    SdcqjyLiveHandler,
+    build_handlers,
     ejy365_asset_for_project_type,
     normalize_attachments_payload,
     split_ai_results,
 )
 from platform_adapters.gxcq_adapter import GxcqDetailBundle, GxcqListItem
+from platform_adapters.ali_adapter import AliDetailBundle, AliListItem
 from platform_adapters.jd_adapter import JDPlatformAdapter
 
 
@@ -327,6 +330,71 @@ class MultiPlatformRunnerTests(unittest.TestCase):
         self.assertNotIn("field_results", record.common_values)
         self.assertEqual(record.field_results["project_name"]["source_path"], "title")
 
+    def test_cquae_handler_does_not_fallback_to_sdcqjy(self):
+        class ExplodingCquaeHandler(CquaeLiveHandler):
+            def _fetch_html(self, url):
+                raise RuntimeError("cquae waf")
+
+        handler = ExplodingCquaeHandler(use_browser=False)
+
+        with self.assertRaisesRegex(RuntimeError, "cquae waf"):
+            handler.fetch_list(1)
+
+    def test_sdcqjy_handler_uses_independent_platform_identity(self):
+        class FakeSdcqjyAdapter:
+            def map_common_candidates(self, detail_bundle):
+                return {
+                    "asset_group": "real_estate",
+                    "asset_type": "房地产",
+                    "project_name": "山东房产项目",
+                    "start_price_raw": "10万元",
+                    "source_site_name": "山东产权交易中心公开门户",
+                }
+
+            def classify_bundle(self, detail_bundle):
+                return "real_estate"
+
+            def map_special_candidates(self, detail_bundle, asset_group):
+                return {}
+
+        handler = SdcqjyLiveHandler()
+        handler.adapter = FakeSdcqjyAdapter()
+        bundle = SimpleNamespace(
+            source_item_id="SWZC260001",
+            source_url="http://www.sdcqjy.com/proj/tc/SWZC260001",
+            list_item=SimpleNamespace(raw_fields={}),
+            raw_html="<html>山东房产项目</html>",
+            attachments=[],
+            image_urls=[],
+        )
+
+        record = handler.build_record(bundle)
+
+        self.assertEqual(record.source_platform, "sdcqjy")
+        self.assertEqual(record.source_site_name, "山东产权交易中心公开门户")
+        self.assertEqual(record.category_id, "sdcqjy")
+        self.assertEqual(record.field_results["project_name"]["source_payload_type"], "detail_html")
+
+    def test_build_handlers_registers_sdcqjy_separately(self):
+        args = SimpleNamespace(
+            ali_item_url=[],
+            jd_categories="",
+            request_timeout=0,
+            output_dir=Path("outputs"),
+            no_browser=True,
+            cquae_headed=False,
+            cquae_profile_path="",
+            ali_profile_path="",
+            ali_headless=True,
+            browser_timeout_ms=0,
+        )
+
+        handlers = build_handlers(args)
+
+        self.assertIn("cquae", handlers)
+        self.assertIn("sdcqjy", handlers)
+        self.assertNotEqual(handlers["cquae"].source_platform, handlers["sdcqjy"].source_platform)
+
     def test_ali_handler_does_not_store_adapter_field_results_as_common_field(self):
         class FakeAliAdapter:
             def map_common_candidates(self, detail_bundle):
@@ -370,12 +438,79 @@ class MultiPlatformRunnerTests(unittest.TestCase):
         self.assertNotIn("field_results", record.common_values)
         self.assertEqual(record.field_results["project_name"]["source_path"], "title")
 
+    def test_ali_item_url_extracts_item_id_not_uniapp_id(self):
+        handler = AliLiveHandler()
+
+        item_id = handler._extract_item_id(
+            "https://pages-fast.m.taobao.com/wow/z/app/pm/dzc-ice/dzc-detail?"
+            "x-ssr=true&disableNav=YES&uniapp_id=1100093&itemId=1053599188591"
+        )
+
+        self.assertEqual(item_id, "1053599188591")
+
     def test_ejy365_project_type_mapping_covers_more_than_creditor_rights(self):
         self.assertEqual(ejy365_asset_for_project_type("ZQ"), ("debt", "债权"))
         self.assertEqual(ejy365_asset_for_project_type("FC"), ("real_estate", "房地产"))
         self.assertEqual(ejy365_asset_for_project_type("CL"), ("vehicle", "车辆"))
         self.assertEqual(ejy365_asset_for_project_type("ZSCQ"), ("ip", "知识产权"))
         self.assertEqual(ejy365_asset_for_project_type("UNKNOWN"), ("other", "其他"))
+
+    def test_ali_fetch_detail_merges_browser_detail_when_mtop_succeeds(self):
+        class FakeBrowserFetcher:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_detail(self, url, *, profile_path=None, timeout_ms=0):
+                self.calls.append((url, profile_path, timeout_ms))
+                return AliDetailBundle(
+                    status="ok",
+                    source_item_id="106000002",
+                    source_url=url,
+                    title="济南市某写字楼",
+                    category="写字楼",
+                    asset_location="山东省济南市",
+                    rendered_text="页面文本",
+                )
+
+        class FakeAliAdapter:
+            def __init__(self):
+                self.browser_fetcher = FakeBrowserFetcher()
+                self.merge_calls = []
+
+            def fetch_mtop_detail(self, list_item):
+                return AliDetailBundle(
+                    status="ok",
+                    source_item_id=list_item.item_id,
+                    source_url=list_item.source_url,
+                    title="济南市某写字楼",
+                    category="prop",
+                    asset_group="other",
+                )
+
+            def merge_detail_bundles(self, primary, fallback):
+                self.merge_calls.append((primary, fallback))
+                primary.asset_group = "real_estate"
+                primary.asset_type = "房地产"
+                primary.asset_location = fallback.asset_location
+                primary.rendered_text = fallback.rendered_text
+                return primary
+
+        handler = AliLiveHandler(profile_path="C:/profile", timeout_ms=12345)
+        handler.adapter = FakeAliAdapter()
+        list_item = AliListItem(
+            item_id="106000002",
+            source_url="https://zc-paimai.taobao.com/auction.htm?itemId=106000002",
+            title="济南市某写字楼",
+        )
+
+        detail = handler.fetch_detail(list_item)
+
+        self.assertEqual(handler.adapter.browser_fetcher.calls[0][1], "C:/profile")
+        self.assertEqual(handler.adapter.browser_fetcher.calls[0][2], 12345)
+        self.assertEqual(len(handler.adapter.merge_calls), 1)
+        self.assertEqual(detail.asset_group, "real_estate")
+        self.assertEqual(detail.asset_location, "山东省济南市")
+        self.assertEqual(detail.rendered_text, "页面文本")
 
     def test_normalize_attachments_payload_filters_entries_without_real_url(self):
         payload = normalize_attachments_payload(
@@ -504,7 +639,7 @@ class MultiPlatformRunnerTests(unittest.TestCase):
                 self.failed = []
                 self.succeeded = []
 
-            def fetch_ai_enrichment_tasks(self, limit, worker_id):
+            def fetch_ai_enrichment_tasks(self, limit, worker_id, task_types=None):
                 return [
                     {
                         "ai_task_id": 1,
@@ -543,6 +678,92 @@ class MultiPlatformRunnerTests(unittest.TestCase):
         finally:
             jd_v2.ai_extractor = original_extractor
 
+    def test_ai_enrichment_worker_marks_task_parsing_and_skips_paused_task(self):
+        class QueueDB:
+            def __init__(self):
+                self.failed = []
+                self.succeeded = []
+                self.applied = []
+                self.parsing_calls = []
+
+            def fetch_ai_enrichment_tasks(self, limit, worker_id, task_types=None):
+                return [
+                    {
+                        "ai_task_id": 1,
+                        "source_platform": "fake",
+                        "source_item_id": "item-paused",
+                        "asset_group": "debt",
+                        "context_json": {"detail_text": "paused", "asset_group": "debt"},
+                    },
+                    {
+                        "ai_task_id": 2,
+                        "source_platform": "fake",
+                        "source_item_id": "item-ok",
+                        "asset_group": "debt",
+                        "context_json": {"detail_text": "ok", "asset_group": "debt"},
+                    },
+                ]
+
+            def mark_ai_enrichment_task_parsing(self, task_id, **kwargs):
+                self.parsing_calls.append((task_id, kwargs))
+                return task_id == 2
+
+            def apply_ai_enrichment_results(self, **kwargs):
+                self.applied.append(kwargs)
+
+            def mark_ai_enrichment_task_failed(self, task_id, error):
+                self.failed.append((task_id, str(error)))
+
+            def mark_ai_enrichment_task_success(self, task_id, result_json):
+                self.succeeded.append((task_id, result_json))
+
+        class SuccessAIExtractor:
+            provider = "qwen"
+            model_name = "qwen-plus"
+            profile_name = "test-qwen"
+
+            def __init__(self):
+                self.calls = []
+
+            def is_available(self):
+                return True
+
+            def batch_extract(self, fields, context):
+                self.calls.append(context.paimai_id)
+                return {
+                    "asset_type": AIExtractionResult(
+                        field_key="asset_type",
+                        field_label="标的类型",
+                        value="债权",
+                        confidence=0.9,
+                        original_text="债权",
+                    )
+                }
+
+        original_extractor = getattr(jd_v2, "ai_extractor", None)
+        extractor = SuccessAIExtractor()
+        jd_v2.ai_extractor = extractor
+        try:
+            db = QueueDB()
+            runner = MultiPlatformRunner(db=db, handlers={}, ai_enabled=True, ai_mode="sync")
+
+            result = runner.process_ai_enrichment_queue(limit=2, worker_id="worker-a", concurrency=1)
+
+            self.assertEqual(result["picked"], 2)
+            self.assertEqual(result["skipped"], 1)
+            self.assertEqual(result["failed"], 0)
+            self.assertEqual(result["success"], 1)
+            self.assertEqual([call[0] for call in db.parsing_calls], [1, 2])
+            self.assertEqual(db.parsing_calls[1][1]["profile_name"], "test-qwen")
+            self.assertEqual(db.parsing_calls[1][1]["provider"], "qwen")
+            self.assertEqual(db.parsing_calls[1][1]["model_name"], "qwen-plus")
+            self.assertEqual(extractor.calls, ["fake:item-ok"])
+            self.assertEqual([row[0] for row in db.succeeded], [2])
+            self.assertEqual(db.failed, [])
+            self.assertEqual(len(db.applied), 1)
+        finally:
+            jd_v2.ai_extractor = original_extractor
+
     def test_ai_enrichment_worker_fails_task_when_ai_returns_only_error_values(self):
         class QueueDB:
             def __init__(self):
@@ -550,7 +771,7 @@ class MultiPlatformRunnerTests(unittest.TestCase):
                 self.succeeded = []
                 self.applied = []
 
-            def fetch_ai_enrichment_tasks(self, limit, worker_id):
+            def fetch_ai_enrichment_tasks(self, limit, worker_id, task_types=None):
                 return [
                     {
                         "ai_task_id": 1,
@@ -615,7 +836,7 @@ class MultiPlatformRunnerTests(unittest.TestCase):
                 self.succeeded = []
                 self.applied = []
 
-            def fetch_ai_enrichment_tasks(self, limit, worker_id):
+            def fetch_ai_enrichment_tasks(self, limit, worker_id, task_types=None):
                 return [
                     {
                         "ai_task_id": 1,

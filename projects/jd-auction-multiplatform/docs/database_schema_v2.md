@@ -175,6 +175,12 @@ AI 上下文策略：
 
 OCR/视觉识别只作为兜底，不作为主路径。系统先尝试接口、HTML、公告表格和 AI 文本提取；只有知识产权明细、图片表格等字段无法从文本中完整获得，且页面存在图片或图片型表格资源时，才写入 `ocr_retry_queue` 等待异步视觉任务处理。OCR 结果通过后续 Worker 写回业务明细表，并在 `field_extractions` 中记录 `method=vision_ai` 和来源图片。
 
+### 2.11 正式表唯一口径
+
+正式 MySQL 存储只使用本 V2 文档中的表结构。旧版测试/预览阶段使用过的 `auction_items_common`、`field_comments`、`crawl_queue_items` 不再作为运行表使用。
+
+重建数据库时可以直接删除旧表和测试数据，然后执行 `sql/mysql_schema_v2.sql`。代码中的 reset 流程会额外 drop 旧表，目的只是清理历史本地测试数据，不能把这些旧表重新引入正式读写链路。
+
 ## 3. 表结构总览
 
 | 表名 | 作用 |
@@ -183,6 +189,9 @@ OCR/视觉识别只作为兜底，不作为主路径。系统先尝试接口、H
 | `crawl_job_runs` | 每次任务执行记录 |
 | `crawl_batches` | 每次采集批次记录，可由手动任务或定时任务产生 |
 | `crawl_queue` | 标的详情采集队列，支持断点续爬和失败重试 |
+| `crawl_checkpoints` | 分平台、分类、分页游标的断点续传记录 |
+| `crawl_queue_events` | 采集队列状态变更流水，用于追踪重试、失败和恢复 |
+| `dead_letter_queue` | 超过重试上限或人工确认异常的死信队列 |
 | `auction_items` | 所有平台、所有资产类型的共有字段主表 |
 | `raw_payloads` | 原始 JSON、HTML、正文、附件文本等归档表 |
 | `field_catalog` | 字段字典和中文备注 |
@@ -213,6 +222,9 @@ erDiagram
     crawl_jobs ||--o{ crawl_job_runs : creates
     crawl_job_runs ||--o{ crawl_batches : creates
     crawl_batches ||--o{ crawl_queue : schedules
+    crawl_jobs ||--o{ crawl_checkpoints : resumes
+    crawl_queue ||--o{ crawl_queue_events : logs
+    crawl_queue ||--o{ dead_letter_queue : dead_letters
     crawl_batches ||--o{ auction_items : collects
     auction_items ||--o{ raw_payloads : archives
     auction_items ||--o{ field_extractions : proves
@@ -355,8 +367,75 @@ running → failed           (全部标的失败)
 ```
 pending → running → success
                    → failed → pending (重试，直到 max_retries 耗尽)
+                   → dead_letter (超过 max_retries 或人工移入死信)
 running 超时后自动回退到 pending
 ```
+
+### 5.5 crawl_checkpoints — 断点续传表
+
+按“任务 + 平台 + 分类 + 采集模式”保存列表分页游标。全量采集和增量采集都依赖该表恢复进度。
+
+| 字段 | 类型 | 说明 |
+|:---|:---|:---|
+| `checkpoint_id` | BIGINT PK AUTO_INCREMENT | 断点 ID |
+| `job_id` | BIGINT NULL | 定时任务 ID，FK → crawl_jobs(job_id) ON DELETE SET NULL |
+| `run_id` | BIGINT NULL | 最近一次任务运行 ID，FK → crawl_job_runs(run_id) ON DELETE SET NULL |
+| `batch_id` | VARCHAR(64) NULL | 最近一次批次 ID，FK → crawl_batches(batch_id) ON DELETE SET NULL |
+| `source_platform` | VARCHAR(50) NOT NULL | 来源平台 |
+| `category_key` | VARCHAR(100) NOT NULL | 平台分类或统一资产类型 |
+| `crawl_mode` | VARCHAR(30) NOT NULL DEFAULT 'incremental' | full/incremental/resume |
+| `cursor_type` | VARCHAR(50) NULL | page/time/id/token 等 |
+| `cursor_value` | VARCHAR(500) NULL | 当前游标值 |
+| `page_no` | INT NULL | 最近成功完成的页码 |
+| `last_seen_source_item_id` | VARCHAR(100) NULL | 最近成功处理的标的 ID |
+| `list_fingerprint` | CHAR(64) NULL | 最近列表内容指纹，用于判断是否重复扫描 |
+| `checkpoint_status` | VARCHAR(30) NOT NULL DEFAULT 'active' | active/completed/failed |
+| `message` | TEXT NULL | 断点说明或失败原因 |
+| `created_at` | DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+| `updated_at` | DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP | 更新时间 |
+
+**唯一键**：`uk_checkpoint_scope (job_id, source_platform, category_key, crawl_mode)`。
+
+### 5.6 crawl_queue_events — 队列事件表
+
+记录采集队列状态变化，解决“任务跑过但不知道卡在哪里”的问题。
+
+| 字段 | 类型 | 说明 |
+|:---|:---|:---|
+| `event_id` | BIGINT PK AUTO_INCREMENT | 事件 ID |
+| `queue_id` | BIGINT NULL | 队列 ID，FK → crawl_queue(queue_id) ON DELETE SET NULL |
+| `batch_id` | VARCHAR(64) NULL | 批次 ID |
+| `item_id` | BIGINT NULL | 标的 ID |
+| `source_platform` | VARCHAR(50) NULL | 来源平台 |
+| `source_item_id` | VARCHAR(100) NULL | 平台原始标的 ID |
+| `from_status` | VARCHAR(30) NULL | 变更前状态 |
+| `to_status` | VARCHAR(30) NULL | 变更后状态 |
+| `event_type` | VARCHAR(50) NOT NULL | discovered/locked/success/failed/retry/dead_letter 等 |
+| `message` | TEXT NULL | 简要说明 |
+| `error_detail` | LONGTEXT NULL | 错误详情 |
+| `created_at` | DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+
+### 5.7 dead_letter_queue — 死信队列表
+
+保存超过重试上限、结构异常、平台风控阻断等无法自动完成的任务，供人工检查或后续专项修复。
+
+| 字段 | 类型 | 说明 |
+|:---|:---|:---|
+| `dead_id` | BIGINT PK AUTO_INCREMENT | 死信 ID |
+| `queue_id` | BIGINT NULL | 原队列 ID，FK → crawl_queue(queue_id) ON DELETE SET NULL |
+| `task_type` | VARCHAR(50) NOT NULL | crawl_detail/ai_enrichment/ocr/attachment_parse |
+| `source_platform` | VARCHAR(50) NOT NULL | 来源平台 |
+| `source_item_id` | VARCHAR(100) NULL | 平台原始标的 ID |
+| `source_url` | VARCHAR(1000) NULL | 来源 URL |
+| `item_id` | BIGINT NULL | 标的 ID |
+| `batch_id` | VARCHAR(64) NULL | 批次 ID |
+| `failure_stage` | VARCHAR(100) NULL | list/detail/ai/ocr/db 等失败阶段 |
+| `retry_count` | INT NOT NULL DEFAULT 0 | 已重试次数 |
+| `error_message` | TEXT NULL | 错误摘要 |
+| `payload_json` | JSON NULL | 失败上下文 |
+| `created_at` | DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+| `resolved_at` | DATETIME NULL | 人工处理时间 |
+| `resolved_status` | VARCHAR(30) NULL | resolved/ignored/requeued |
 
 ## 6. 核心业务表
 
@@ -1115,6 +1194,13 @@ LIMIT 20
 | `auction_items` | `batch_id` | `crawl_batches` | `batch_id` | SET NULL |
 | `crawl_queue` | `batch_id` | `crawl_batches` | `batch_id` | SET NULL |
 | `crawl_queue` | `item_id` | `auction_items` | `item_id` | SET NULL |
+| `crawl_checkpoints` | `job_id` | `crawl_jobs` | `job_id` | SET NULL |
+| `crawl_checkpoints` | `run_id` | `crawl_job_runs` | `run_id` | SET NULL |
+| `crawl_checkpoints` | `batch_id` | `crawl_batches` | `batch_id` | SET NULL |
+| `crawl_queue_events` | `queue_id` | `crawl_queue` | `queue_id` | SET NULL |
+| `crawl_queue_events` | `item_id` | `auction_items` | `item_id` | SET NULL |
+| `dead_letter_queue` | `queue_id` | `crawl_queue` | `queue_id` | SET NULL |
+| `dead_letter_queue` | `item_id` | `auction_items` | `item_id` | SET NULL |
 | `raw_payloads` | `item_id` | `auction_items` | `item_id` | CASCADE |
 | `raw_payloads` | `batch_id` | `crawl_batches` | `batch_id` | SET NULL |
 | `field_extractions` | `item_id` | `auction_items` | `item_id` | CASCADE |
@@ -1185,6 +1271,8 @@ LIMIT 20
 | `site_images_summary` | (旧设计) | 通过 `item_resources` 实时统计 |
 | `vehicle_images_summary` | (旧设计) | 通过 `item_resources` 实时统计 |
 | `field_comments` 表 | 旧 Viewer | 使用 `field_catalog` |
+| `auction_items_common` 表 | 旧 SQLite/预览设计 | 使用 `auction_items` |
+| `crawl_queue_items` 表 | 旧队列兼容设计 | 使用 `crawl_queue` |
 | `paimai_id` 作为主键 | 旧设计 | 使用 `item_id BIGINT AUTO_INCREMENT` |
 | `attachments_json` | raw_payloads | 保留作为原始归档，业务查询使用 `item_resources` |
 | `attachment_texts` | raw_payloads | 保留作为原始归档 |

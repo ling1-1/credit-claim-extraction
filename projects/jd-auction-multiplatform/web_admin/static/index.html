@@ -1,0 +1,2605 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>拍卖数据采集管理平台</title>
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/element-plus"></script>
+  <script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
+  <script src="https://unpkg.com/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    :root {
+      --page-bg: #f4f6f8;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --line: #d9e1ea;
+      --line-soft: #e8edf3;
+      --text: #162033;
+      --muted: #607087;
+      --primary: #0f766e;
+      --primary-soft: #e8f5f3;
+      --danger: #b42318;
+      --warning: #b7791f;
+      --success: #15803d;
+      --shadow: 0 1px 2px rgba(15, 23, 42, .06);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--page-bg);
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+    a { color: var(--primary); text-decoration: none; }
+
+    .shell { min-height: 100vh; display: flex; flex-direction: column; }
+    .topbar {
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .brand { font-size: 18px; font-weight: 700; white-space: nowrap; }
+    .top-actions { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+    .top-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: var(--surface-soft);
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; display: inline-block; }
+    .status-dot.ok { background: var(--success); }
+    .status-dot.bad { background: var(--danger); }
+
+    .layout { display: flex; min-height: calc(100vh - 56px); }
+    .sidebar {
+      width: 184px;
+      background: var(--surface);
+      border-right: 1px solid var(--line);
+      padding: 12px 8px;
+      position: sticky;
+      top: 56px;
+      height: calc(100vh - 56px);
+    }
+    .nav-item {
+      display: block;
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 6px;
+      margin-bottom: 4px;
+      font-weight: 500;
+    }
+    .nav-item:hover { background: var(--surface-soft); }
+    .nav-item.router-link-active {
+      color: var(--primary);
+      background: var(--primary-soft);
+      border-left: 3px solid var(--primary);
+      padding-left: 9px;
+    }
+
+    .content {
+      flex: 1;
+      min-width: 0;
+      padding: 18px;
+    }
+    .page-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    .page-title h1 { margin: 0; font-size: 20px; line-height: 1.35; }
+    .page-title p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .metric, .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      box-shadow: var(--shadow);
+    }
+    .metric { padding: 12px; min-height: 78px; }
+    .metric .label { color: var(--muted); font-size: 12px; }
+    .metric .value { margin-top: 6px; font-size: 24px; font-weight: 700; }
+    .metric .sub { margin-top: 2px; color: var(--muted); font-size: 12px; }
+
+    .grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .55fr); gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .panel { margin-bottom: 12px; overflow: hidden; }
+    .panel-head {
+      min-height: 42px;
+      padding: 10px 14px;
+      background: var(--surface-soft);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .panel-head h2 { margin: 0; font-size: 15px; }
+    .panel-body { padding: 12px 14px; }
+
+    .filters {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      margin-bottom: 12px;
+    }
+    .filters .el-input, .filters .el-select { width: 180px; }
+    .filters .wide { width: 260px; }
+    .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .table-wrap { overflow-x: auto; }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .strong { font-weight: 700; }
+    .mono { font-family: Consolas, "Courier New", monospace; }
+    .nowrap { white-space: nowrap; }
+    .truncate {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 420px;
+      display: block;
+    }
+    .pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 220px;
+      overflow: auto;
+      background: var(--surface-soft);
+      border: 1px solid var(--line-soft);
+      border-radius: 4px;
+      padding: 8px;
+      font-size: 12px;
+    }
+    .error-box {
+      color: var(--danger);
+      background: #fff1f0;
+      border: 1px solid #fecaca;
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+    }
+    .empty {
+      color: var(--muted);
+      text-align: center;
+      padding: 28px 0;
+    }
+
+    .el-table { --el-table-header-bg-color: #f1f5f9; font-size: 13px; }
+    .el-button { border-radius: 4px; }
+    .el-card { border-radius: 6px; }
+    .el-dialog { max-width: 960px; }
+    .chart { width: 100%; height: 260px; }
+
+    @media (max-width: 1180px) {
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .sidebar { width: 150px; }
+    }
+    @media (max-width: 760px) {
+      .layout { flex-direction: column; }
+      .sidebar {
+        width: 100%;
+        height: auto;
+        position: static;
+        display: flex;
+        overflow-x: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .nav-item { white-space: nowrap; }
+      .topbar { align-items: flex-start; height: auto; padding: 10px 12px; flex-direction: column; gap: 8px; }
+      .content { padding: 12px; }
+    }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+const { createApp, ref, reactive, computed, onMounted, onUnmounted, nextTick } = Vue;
+const { createRouter, createWebHashHistory } = VueRouter;
+const { ElMessage, ElMessageBox } = ElementPlus;
+
+const PLATFORM_LABELS = {
+  jd: "京东拍卖",
+  ali: "阿里拍卖",
+  ejy365: "e交易",
+  cquae: "重庆产权",
+  sdcqjy: "山东产权",
+  tpre: "天津产权",
+  cbex: "北京产权",
+  prechina: "贵州阳光产权",
+  gxcq: "广西产权"
+};
+
+const FIELD_LABELS = {
+  item_id: "标的ID",
+  source_platform: "来源平台",
+  source_item_id: "平台标的ID",
+  source_url: "来源页面",
+  source_site_name: "来源站点",
+  batch_id: "批次号",
+  asset_group: "资产类型",
+  asset_group_label: "资产类型",
+  source_category_id: "来源类目ID",
+  source_category_name: "来源类目",
+  asset_type: "标的类型",
+  asset_location: "标的所在地",
+  project_status: "项目状态",
+  project_status_basis: "状态依据",
+  auction_stage: "拍卖阶段",
+  bid_records_count: "出价次数",
+  bid_records_json: "出价记录",
+  data_source: "数据来源",
+  project_name: "项目名称",
+  signup_start_time: "报名开始时间",
+  signup_end_time: "报名截止时间",
+  disposal_party: "处置方",
+  disposal_agency: "处置机构",
+  start_price_amount: "起拍价数值",
+  start_price_display: "起拍价",
+  final_price_amount: "最终价数值",
+  final_price_display: "最终价",
+  assessment_price_amount: "评估价数值",
+  assessment_price_display: "评估价格及时间",
+  assessment_date: "评估日期",
+  contact_info: "联系方式",
+  special_notice: "特别告知",
+  right_holder: "权利人",
+  disclosed_defects: "公示瑕疵",
+  first_seen_at: "首次发现",
+  last_crawled_at: "最后采集",
+  created_at: "创建时间",
+  updated_at: "更新时间",
+  right_certificate_no: "权证编号",
+  building_area_sqm: "建筑面积(㎡)",
+  building_area_display: "建筑面积",
+  property_use: "房产用途",
+  use_term: "使用年限",
+  property_location: "房产位置",
+  property_structure: "房产结构",
+  property_status: "房产状态",
+  property_type: "房产类型",
+  asset_highlights: "资产亮点",
+  land_area_sqm: "土地面积(㎡)",
+  land_area_display: "土地面积",
+  land_use: "土地用途",
+  land_location: "土地位置",
+  land_status: "土地状态",
+  land_type: "土地类型",
+  storage_location: "存放位置",
+  equipment_status: "设备状态",
+  equipment_type: "设备类型",
+  vehicle_brand: "车型品牌",
+  vehicle_usage: "车辆使用情况",
+  plate_no: "车牌号",
+  vehicle_config: "车辆配置",
+  vehicle_status: "车辆状态",
+  vehicle_type: "车辆类型",
+  main_debtor_name: "主债务人名称",
+  principal_balance_amount: "本金余额数值",
+  principal_balance_display: "本金余额",
+  interest_balance_amount: "利息余额数值",
+  interest_balance_display: "利息余额",
+  benchmark_date: "基准日",
+  guarantee_method: "担保方式",
+  guarantor: "保证人",
+  collateral: "抵质押物",
+  litigation_status: "诉讼状态",
+  creditor: "债权人",
+  household_count: "户数",
+  debt_detail_id: "债权明细ID",
+  detail_index: "明细序号",
+  sequence_no: "序号",
+  debtor_name: "债务人名称",
+  claim_total_amount: "债权总额",
+  transferor: "转让方",
+  target_company: "标的企业",
+  share_ratio: "股权占比",
+  enterprise_nature: "企业性质",
+  enterprise_industry: "企业行业",
+  business_scope: "经营范围",
+  equity_structure: "股权结构",
+  financial_indicators: "财务指标",
+  asset_appraisal: "资产评估",
+  public_matters: "公示事项",
+  attached_assets: "附带标的",
+  ip_detail_id: "知识产权明细ID",
+  ip_name: "标的名称",
+  certificate_no: "标的证号",
+  registration_no: "登记号",
+  application_no: "申请号",
+  application_date: "申请日",
+  approval_date: "登记/批准日期",
+  acquire_method: "取得方式",
+  ip_type: "知产类型",
+  ip_category: "具体类别",
+  ip_intro: "标的简介",
+  right_term: "权利期限",
+  status: "状态",
+  goods_category: "物资种类",
+  goods_name: "物资名称",
+  goods_location: "物资所在位置",
+  goods_detail: "物资详情",
+  usufruct_category: "权益种类",
+  target_name: "标的名称",
+  target_location: "标的所在位置",
+  target_detail: "标的物详情",
+  valid_until: "有效期",
+  original_right_holder: "原权利人",
+  resource_id: "资源ID",
+  resource_type: "资源类型",
+  resource_name: "资源名称",
+  resource_url: "资源链接",
+  source_section: "来源区块",
+  field_namespace: "字段分组",
+  field_key: "字段键",
+  field_label: "字段名称",
+  raw_value: "原始值",
+  source_type: "来源类型",
+  source_excerpt: "证据片段",
+  confidence: "置信度",
+  queue_id: "队列ID",
+  queue_status: "队列状态",
+  retry_count: "重试次数",
+  locked_by: "锁定者",
+  locked_at: "锁定时间",
+  last_error: "错误原因",
+  error_message: "错误原因",
+  // ── V2 schema 新增 / adapter 非标准字段名映射 ──
+  main_debtor_name: "主债务人名称",
+  debtor_names: "债务人汇总",
+  claim_total_display: "债权总额(展示)",
+  company_nature: "企业性质",
+  ip_count: "知产数量",
+  specific_category: "具体类别",
+  subject_intro: "标的简介",
+  right_burden: "权利负担",
+  raw_detail_text: "原始详情文本",
+  raw_table_pairs_json: "原始表格数据",
+  extracted_summary: "AI提取摘要",
+  // ── 各平台 adapter 产生的非标准字段名 ──
+  vehicle_travel_model: "行驶里程/排量型号",
+  plate_number: "车牌号",
+  vehicle_configuration: "车辆配置",
+  equity_ratio: "股权占比",
+  company_feature: "企业特征",
+  company_industry: "企业行业",
+  bidder_name: "竞买人名称",
+  claim_html_display: "债权说明",
+  ownership_structure: "股权结构",
+  financial_metrics: "财务指标",
+  asset_valuation: "资产评估",
+  disclosure_items: "公示事项",
+};
+
+const STATUS_TYPE = {
+  success: "success",
+  partial_success: "warning",
+  failed: "danger",
+  running: "primary",
+  parsing: "warning",
+  paused: "info",
+  pending: "info",
+  pending_ai: "warning",
+  updated: "success",
+  unchanged: "info",
+  skipped: "info",
+  completed: "success",
+  timeout: "danger",
+  enabled: "success",
+  disabled: "info"
+};
+
+function textOf(value, fallback = "-") {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function numberOf(value) {
+  const num = Number(value || 0);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function formatTime(value) {
+  if (!value) return "-";
+  return String(value).replace("T", " ").replace(/\.\d+$/, "");
+}
+
+function platformName(value) {
+  return PLATFORM_LABELS[value] || value || "-";
+}
+
+function fieldLabel(key) {
+  return FIELD_LABELS[key] || key || "-";
+}
+
+function fieldRows(obj, options = {}) {
+  const hidden = new Set(options.hidden || ["item_id"]);
+  return Object.entries(obj || {})
+    .filter(([key]) => !hidden.has(key))
+    .map(([key, value]) => ({ key, label: fieldLabel(key), value }));
+}
+
+function detailColumns(rows) {
+  const first = (rows || [])[0] || {};
+  return Object.keys(first).map(key => ({ key, label: fieldLabel(key) }));
+}
+
+async function apiRequest(url, options = {}) {
+  const opts = { ...options };
+  opts.headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  const res = await fetch(url, opts);
+  const contentType = res.headers.get("content-type") || "";
+  let data;
+  if (contentType.includes("application/json")) {
+    data = await res.json();
+  } else {
+    data = await res.text();
+  }
+  if (url.startsWith("/api/") && !contentType.includes("application/json")) {
+    throw new Error(`接口返回了非 JSON 内容，可能命中了前端页面或后端路由未注册：${url}`);
+  }
+  if (!res.ok) {
+    const detail = typeof data === "object" ? (data.detail || data.message || JSON.stringify(data)) : data;
+    throw new Error(detail || `请求失败：${res.status}`);
+  }
+  return data;
+}
+
+function usePageLoader() {
+  const loading = ref(false);
+  const error = ref("");
+  async function load(fn) {
+    loading.value = true;
+    error.value = "";
+    try {
+      return await fn();
+    } catch (err) {
+      error.value = err.message || String(err);
+      ElMessage.error(error.value);
+      throw err;
+    } finally {
+      loading.value = false;
+    }
+  }
+  return { loading, error, load };
+}
+
+const ErrorBox = {
+  props: ["message"],
+  template: `<div v-if="message" class="error-box">{{ message }}</div>`
+};
+
+const StatusTag = {
+  props: ["value"],
+  template: `
+    <el-tag size="small" :type="tagType">
+      {{ value || "-" }}
+    </el-tag>
+  `,
+  computed: {
+    tagType() {
+      return STATUS_TYPE[this.value] || "";
+    }
+  }
+};
+
+const DashboardPage = {
+  components: { ErrorBox, StatusTag },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const stats = ref({});
+    const scheduler = ref({});
+    const tasks = ref([]);
+    const platforms = ref([]);
+    const reports = ref([]);
+    const activity = ref([]);
+    const trend = ref([]);
+    const platformDist = ref([]);
+    const assetDist = ref([]);
+    const platformChartEl = ref(null);
+    const assetChartEl = ref(null);
+    const trendChartEl = ref(null);
+    let platformChart = null;
+    let assetChart = null;
+    let trendChart = null;
+    let refreshTimer = null;
+
+    const aiQueue = computed(() => stats.value.ai_queue || {});
+    const runningTasks = computed(() => tasks.value.filter(t => ["running", "pending"].includes(t.status)));
+
+    async function refresh() {
+      await load(async () => {
+        const [s, sch, taskRes, platformRes, reportRes, recent, trendRes, platformDistRes, assetDistRes] = await Promise.allSettled([
+          apiRequest("/api/dashboard/stats"),
+          apiRequest("/api/scheduler/status"),
+          apiRequest("/api/tasks"),
+          apiRequest("/api/platforms"),
+          apiRequest("/api/reports?size=5"),
+          apiRequest("/api/dashboard/recent-activity?limit=8"),
+          apiRequest("/api/dashboard/trend?days=7"),
+          apiRequest("/api/dashboard/platform-distribution"),
+          apiRequest("/api/dashboard/asset-distribution")
+        ]);
+        if (s.status === "fulfilled") stats.value = s.value || {};
+        if (sch.status === "fulfilled") scheduler.value = sch.value || {};
+        if (taskRes.status === "fulfilled") tasks.value = taskRes.value.items || [];
+        if (platformRes.status === "fulfilled") platforms.value = platformRes.value || [];
+        if (reportRes.status === "fulfilled") reports.value = reportRes.value.items || [];
+        if (recent.status === "fulfilled") activity.value = recent.value || [];
+        if (trendRes.status === "fulfilled") trend.value = trendRes.value || [];
+        if (platformDistRes.status === "fulfilled") platformDist.value = platformDistRes.value || [];
+        if (assetDistRes.status === "fulfilled") assetDist.value = assetDistRes.value || [];
+        await nextTick();
+        renderCharts();
+      });
+    }
+
+    function renderCharts() {
+      if (!window.echarts) return;
+      if (platformChartEl.value) {
+        platformChart = platformChart || echarts.init(platformChartEl.value);
+        const rows = platformDist.value || [];
+        platformChart.setOption(JSON.parse(JSON.stringify({
+          tooltip: { trigger: "item" },
+          series: [{
+            type: "pie",
+            radius: ["45%", "70%"],
+            data: rows.map(row => ({
+              name: platformName(row.platform || row.source_platform),
+              value: numberOf(row.total_items || row.count)
+            }))
+          }]
+        })), true);
+      }
+      if (assetChartEl.value) {
+        assetChart = assetChart || echarts.init(assetChartEl.value);
+        const rows = (assetDist.value || []);
+        const maxVal = Math.max(...rows.map(r => numberOf(r.count || r.total_items)), 1);
+        assetChart.setOption(JSON.parse(JSON.stringify({
+          tooltip: {
+            trigger: "axis",
+            formatter: function(params) {
+              var p = params[0];
+              return p.name + "<br/>数量: <b>" + p.value + "</b>";
+            }
+          },
+          grid: { left: 36, right: 16, top: 16, bottom: 75 },
+          xAxis: {
+            type: "category",
+            data: rows.map(function(row) { return row.asset_group_label || row.asset_group || "-"; }),
+            axisLabel: { rotate: 30, interval: 0, fontSize: 11, color: "#666" }
+          },
+          yAxis: {
+            type: "value",
+            min: 0,
+            max: Math.ceil(maxVal * 1.15),
+            splitNumber: 4
+          },
+          series: [{
+            type: "bar",
+            data: rows.map(function(row) { return numberOf(row.count || row.total_items); }),
+            itemStyle: { color: "#0f766e", borderRadius: [3, 3, 0, 0] },
+            barMaxWidth: 32,
+            label: { show: true, position: "top", fontSize: 11, color: "#333" }
+          }]
+        })), true);
+      }
+      if (trendChartEl.value) {
+        trendChart = trendChart || echarts.init(trendChartEl.value);
+        const rows = trend.value || [];
+        trendChart.setOption(JSON.parse(JSON.stringify({
+          tooltip: { trigger: "axis" },
+          grid: { left: 40, right: 16, top: 20, bottom: 40 },
+          xAxis: { type: "category", data: rows.map(row => row.day || row.date || row.created_date || "-") },
+          yAxis: { type: "value" },
+          series: [{
+            type: "line",
+            smooth: true,
+            data: rows.map(row => numberOf(row.items_collected || row.total_items || row.count || row.item_count || 0)),
+            itemStyle: { color: "#2563eb" }
+          }]
+        })), true);
+      }
+    }
+
+    function resizeCharts() {
+      [platformChart, assetChart, trendChart].forEach(chart => chart && chart.resize());
+    }
+
+    async function schedulerAction(action) {
+      try {
+        const res = await apiRequest(`/api/scheduler/${action}`, { method: "POST" });
+        ElMessage.success(res.message || "操作完成");
+        await refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "操作失败");
+      }
+    }
+
+    onMounted(() => {
+      refresh();
+      refreshTimer = setInterval(refresh, 15000);
+      window.addEventListener("resize", resizeCharts);
+    });
+    onUnmounted(() => {
+      if (refreshTimer) clearInterval(refreshTimer);
+      window.removeEventListener("resize", resizeCharts);
+      [platformChart, assetChart, trendChart].forEach(chart => chart && chart.dispose());
+    });
+
+    return {
+      loading, error, stats, scheduler, tasks, platforms, reports, activity,
+      aiQueue, runningTasks, refresh, schedulerAction, platformName, formatTime,
+      numberOf, textOf, platformChartEl, assetChartEl, trendChartEl, renderCharts
+    };
+  },
+  template: `
+    <section>
+      <div class="page-title">
+        <div>
+          <h1>运营总览</h1>
+          <p>查看采集任务、队列、平台和数据质量的当前状态。</p>
+        </div>
+        <div class="toolbar">
+          <el-button @click="refresh" :loading="loading">刷新</el-button>
+          <el-button type="primary" plain @click="schedulerAction('sync')">同步调度器</el-button>
+        </div>
+      </div>
+      <ErrorBox :message="error" />
+
+      <div class="metrics">
+        <div class="metric"><div class="label">标的总数</div><div class="value">{{ numberOf(stats.total_items) }}</div><div class="sub">数据库当前记录</div></div>
+        <div class="metric"><div class="label">今日新增</div><div class="value">{{ numberOf(stats.today_items) }}</div><div class="sub">按 last_crawled_at 统计</div></div>
+        <div class="metric"><div class="label">来源平台</div><div class="value">{{ numberOf(stats.total_platforms) }}</div><div class="sub">已入库平台数</div></div>
+        <div class="metric"><div class="label">今日失败批次</div><div class="value">{{ numberOf(stats.today_failed_batches) }}</div><div class="sub">需优先排查</div></div>
+        <div class="metric"><div class="label">AI 待处理</div><div class="value">{{ numberOf(aiQueue.pending) }}</div><div class="sub">运行中 {{ numberOf(aiQueue.running) }}，解析中 {{ numberOf(aiQueue.parsing) }}，暂停 {{ numberOf(aiQueue.paused) }}，失败 {{ numberOf(aiQueue.failed) }}</div></div>
+      </div>
+
+      <div class="grid-3">
+        <div class="panel">
+          <div class="panel-head"><h2>平台数据分布</h2></div>
+          <div class="panel-body"><div ref="platformChartEl" class="chart"></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>资产类型分布</h2></div>
+          <div class="panel-body"><div ref="assetChartEl" class="chart"></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>近 7 日采集趋势</h2></div>
+          <div class="panel-body"><div ref="trendChartEl" class="chart"></div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>调度器状态</h2>
+          <div class="toolbar">
+            <el-button size="small" @click="schedulerAction('start')">启动</el-button>
+            <el-button size="small" @click="schedulerAction('stop')">停止</el-button>
+            <el-button size="small" @click="schedulerAction('restart')">重启</el-button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <span class="top-pill"><span class="status-dot" :class="{ok: scheduler.running, bad: scheduler.running === false}"></span>{{ scheduler.running ? "运行中" : "未运行" }}</span>
+          <span class="top-pill">已加载任务 {{ numberOf(scheduler.jobs_count || scheduler.job_count) }}</span>
+          <span class="top-pill">后台任务 {{ runningTasks.length }}</span>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>最近采集批次</h2><router-link to="/batches">查看全部</router-link></div>
+          <div class="table-wrap">
+            <el-table :data="activity" size="small" empty-text="暂无批次记录">
+              <el-table-column prop="batch_id" label="批次" min-width="150" show-overflow-tooltip />
+              <el-table-column label="平台" width="120">
+                <template #default="{row}">{{ platformName(row.source_platform) }}</template>
+              </el-table-column>
+              <el-table-column prop="started_at_display" label="开始时间" width="150" />
+              <el-table-column label="状态" width="110">
+                <template #default="{row}"><StatusTag :value="row.status" /></template>
+              </el-table-column>
+              <el-table-column prop="message" label="说明" min-width="200" show-overflow-tooltip />
+            </el-table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>平台概况</h2><router-link to="/platforms">查看平台</router-link></div>
+          <div class="table-wrap">
+            <el-table :data="platforms.slice(0, 8)" size="small" empty-text="暂无平台数据">
+              <el-table-column label="平台" min-width="120">
+                <template #default="{row}">{{ row.name || platformName(row.platform) }}</template>
+              </el-table-column>
+              <el-table-column prop="total_items" label="数据量" width="90" />
+              <el-table-column prop="asset_type_count" label="类型" width="70" />
+              <el-table-column prop="recent_success_rate" label="近7日成功率" width="110">
+                <template #default="{row}">{{ textOf(row.recent_success_rate) }}%</template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </div>
+      </div>
+    </section>
+  `
+};
+
+const JobsPage = {
+  components: { ErrorBox, StatusTag },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const jobs = ref([]);
+    const total = ref(0);
+    const tasks = ref([]);
+    const filters = reactive({ platform: "", status: "", page: 1, size: 20 });
+    const dialogVisible = ref(false);
+    const editing = ref(null);
+    const cronPreview = ref(null);
+    const form = reactive({
+      job_name: "",
+      source_platform: "jd",
+      cron_expr: "0 2 * * *",
+      crawl_mode: "incremental",
+      category_scope: "",
+      page_limit: 5,
+      per_category_limit: 10,
+      throttle_seconds: 0.35,
+      ai_enabled: true,
+      attachment_parse_enabled: false,
+      enabled: true
+    });
+    let timer = null;
+
+    async function refresh() {
+      await load(async () => {
+        const params = new URLSearchParams({
+          page: filters.page,
+          size: filters.size,
+          platform: filters.platform,
+          status: filters.status
+        });
+        const [jobRes, taskRes] = await Promise.all([
+          apiRequest(`/api/jobs?${params}`),
+          apiRequest("/api/tasks")
+        ]);
+        jobs.value = jobRes.items || [];
+        total.value = jobRes.total || 0;
+        tasks.value = taskRes.items || [];
+      });
+    }
+    function onJobFilterChange() { filters.page = 1; refresh(); }
+    function onJobPageChange(pn) { filters.page = pn; refresh(); }
+
+    function resetForm(row) {
+      editing.value = row || null;
+      Object.assign(form, {
+        job_name: row?.job_name || "",
+        source_platform: row?.source_platform || "jd",
+        cron_expr: row?.cron_expr || "0 2 * * *",
+        crawl_mode: row?.crawl_mode || "incremental",
+        category_scope: row?.category_scope || "",
+        page_limit: row?.page_limit ?? 5,
+        per_category_limit: row?.per_category_limit ?? 10,
+        throttle_seconds: row?.throttle_seconds ?? 0.35,
+        item_concurrency: row?.item_concurrency ?? 3,
+        ai_enabled: row?.ai_enabled === undefined ? true : !!row.ai_enabled,
+        attachment_parse_enabled: !!row?.attachment_parse_enabled,
+        enabled: row?.enabled === undefined ? true : !!row.enabled
+      });
+      cronPreview.value = null;
+      dialogVisible.value = true;
+    }
+
+    async function previewCron() {
+      if (!form.cron_expr.trim()) {
+        cronPreview.value = { valid: true, next_run: null };
+        return;
+      }
+      try {
+        cronPreview.value = await apiRequest(`/api/scheduler/preview?expr=${encodeURIComponent(form.cron_expr)}`);
+      } catch (err) {
+        cronPreview.value = { valid: false, error: err.message };
+      }
+    }
+
+    async function saveJob() {
+      if (!form.job_name.trim()) return ElMessage.error("请填写任务名称");
+      await previewCron();
+      if (cronPreview.value && cronPreview.value.valid === false) {
+        return ElMessage.error(cronPreview.value.error || "Cron 表达式无效");
+      }
+      const payload = { ...form };
+      const url = editing.value ? `/api/jobs/${editing.value.job_id}` : "/api/jobs";
+      const method = editing.value ? "PUT" : "POST";
+      try {
+        const res = await apiRequest(url, { method, body: JSON.stringify(payload) });
+        ElMessage.success(res.message || "保存成功");
+        dialogVisible.value = false;
+        await refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "保存失败");
+      }
+    }
+
+    async function runNow(row) {
+      try {
+        const res = await apiRequest(`/api/jobs/${row.job_id}/run-now`, { method: "POST" });
+        ElMessage.success(`任务已触发：${res.task_id}`);
+        await refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "触发失败");
+      }
+    }
+
+    async function toggleJob(row) {
+      try {
+        await apiRequest(`/api/jobs/${row.job_id}/toggle`, { method: "POST" });
+        await refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "切换失败");
+      }
+    }
+
+    async function deleteJob(row) {
+      try {
+        await ElMessageBox.confirm(`确认删除任务“${row.job_name}”？`, "删除任务", { type: "warning" });
+        await apiRequest(`/api/jobs/${row.job_id}`, { method: "DELETE" });
+        ElMessage.success("已删除");
+        await refresh();
+      } catch (err) {
+        if (err !== "cancel") ElMessage.error(err.message || "删除失败");
+      }
+    }
+
+    onMounted(() => {
+      refresh();
+      timer = setInterval(refresh, 5000);
+    });
+    onUnmounted(() => timer && clearInterval(timer));
+
+    return { loading, error, jobs, total, tasks, filters, form, dialogVisible, editing, cronPreview, PLATFORM_LABELS, refresh, resetForm, previewCron, saveJob, runNow, toggleJob, deleteJob, platformName, formatTime, textOf, onJobFilterChange, onJobPageChange };
+  },
+  template: `
+    <section>
+      <div class="page-title">
+        <div><h1>任务管理</h1><p>创建、启停、立即运行采集任务，并跟踪后台任务状态。</p></div>
+        <el-button type="primary" @click="resetForm()">新建任务</el-button>
+      </div>
+      <ErrorBox :message="error" />
+
+      <div class="filters">
+        <el-select v-model="filters.platform" placeholder="来源平台" clearable @change="onJobFilterChange">
+          <el-option v-for="(label, key) in PLATFORM_LABELS" :key="key" :label="label" :value="key" />
+        </el-select>
+        <el-select v-model="filters.status" placeholder="启用状态" clearable @change="onJobFilterChange">
+          <el-option label="启用" value="enabled" />
+          <el-option label="停用" value="disabled" />
+        </el-select>
+        <el-button @click="onJobFilterChange" :loading="loading">查询</el-button>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>任务列表</h2><span class="muted small">保存后会自动同步调度器</span></div>
+        <div class="table-wrap">
+          <el-table :data="jobs" v-loading="loading" empty-text="暂无任务">
+            <el-table-column prop="job_id" label="ID" width="70" />
+            <el-table-column prop="job_name" label="任务名称" min-width="190" show-overflow-tooltip />
+            <el-table-column label="平台" width="110"><template #default="{row}">{{ platformName(row.source_platform) }}</template></el-table-column>
+            <el-table-column prop="cron_expr" label="Cron" width="130" />
+            <el-table-column label="模式" width="80"><template #default="{row}"><el-tag size="small" :type="row.crawl_mode === 'full' ? 'warning' : (row.crawl_mode === 'sample' ? 'info' : '')">{{ {incremental:'增量',full:'全量',sample:'自定义'}[row.crawl_mode] || row.crawl_mode }}</el-tag></template></el-table-column>
+            <el-table-column prop="next_run_time" label="下次运行" width="170"><template #default="{row}">{{ formatTime(row.next_run_time) }}</template></el-table-column>
+            <el-table-column label="状态" width="90"><template #default="{row}"><StatusTag :value="row.enabled ? 'enabled' : 'disabled'" /></template></el-table-column>
+            <el-table-column prop="last_run_at" label="最近运行" width="170"><template #default="{row}">{{ formatTime(row.last_run_at) }}</template></el-table-column>
+            <el-table-column label="操作" width="280" fixed="right">
+              <template #default="{row}">
+                <el-button size="small" @click="runNow(row)">立即运行</el-button>
+                <el-button size="small" @click="resetForm(row)">编辑</el-button>
+                <el-button size="small" @click="toggleJob(row)">{{ row.enabled ? "停用" : "启用" }}</el-button>
+                <el-button size="small" type="danger" plain @click="deleteJob(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+        <div class="panel-body">
+          <el-pagination layout="prev, pager, next, total" :total="total" :page-size="filters.size" v-model:current-page="filters.page" @current-change="onJobPageChange" />
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>后台任务状态</h2><span class="muted small">每 5 秒自动刷新</span></div>
+        <el-table :data="tasks" size="small" empty-text="暂无后台任务">
+          <el-table-column prop="task_id" label="任务 ID" min-width="220" show-overflow-tooltip />
+          <el-table-column prop="type" label="类型" width="120" />
+          <el-table-column prop="platform" label="平台" width="110"><template #default="{row}">{{ platformName(row.platform) }}</template></el-table-column>
+          <el-table-column label="状态" width="110"><template #default="{row}"><StatusTag :value="row.status" /></template></el-table-column>
+          <el-table-column prop="return_code" label="退出码" width="80" />
+          <el-table-column prop="error" label="错误" min-width="220" show-overflow-tooltip />
+        </el-table>
+      </div>
+
+      <el-dialog v-model="dialogVisible" :title="editing ? '编辑任务' : '新建任务'" width="760px">
+        <el-form label-width="120px">
+          <el-form-item label="任务名称"><el-input v-model="form.job_name" /></el-form-item>
+          <el-form-item label="来源平台">
+            <el-select v-model="form.source_platform">
+              <el-option v-for="(label, key) in PLATFORM_LABELS" :key="key" :label="label" :value="key" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="Cron 表达式">
+            <div style="display:flex;gap:8px;width:100%">
+              <el-input v-model="form.cron_expr" placeholder="例如：0 2 * * *" />
+              <el-button @click="previewCron">预览</el-button>
+            </div>
+            <div class="small" :style="{color: cronPreview && cronPreview.valid === false ? 'var(--danger)' : 'var(--muted)'}">
+              <template v-if="cronPreview">{{ cronPreview.valid ? ('下次运行：' + (cronPreview.next_run || '未设置')) : (cronPreview.error || 'Cron 无效') }}</template>
+            </div>
+          </el-form-item>
+          <el-form-item label="采集模式">
+            <el-radio-group v-model="form.crawl_mode">
+              <el-radio label="incremental" border>增量采集</el-radio>
+              <el-radio label="full" border>全量采集</el-radio>
+              <el-radio label="sample" border>自定义</el-radio>
+            </el-radio-group>
+            <div class="small muted">
+              <template v-if="form.crawl_mode === 'incremental'">仅采集新增/变化的标的，适合每日定时任务</template>
+              <template v-else-if="form.crawl_mode === 'full'">扫描全部列表页，适合首次初始化或定期校准</template>
+              <template v-else>按固定数量采集，适合测试或手动触发的单次采集</template>
+            </div>
+          </el-form-item>
+                    <template v-if="form.crawl_mode === 'sample'">
+            <el-form-item label="分页数"><el-input-number v-model="form.page_limit" :min="1" :max="200" /></el-form-item>
+            <el-form-item label="采集数量"><el-input-number v-model="form.per_category_limit" :min="1" :max="500" /></el-form-item>
+            <el-form-item label="限速秒数"><el-input-number v-model="form.throttle_seconds" :min="0" :step="0.1" /></el-form-item>
+          </template>
+          <el-form-item label="开关">
+              <el-checkbox v-model="form.enabled">启用</el-checkbox>
+              <el-checkbox v-model="form.ai_enabled">AI 补提取</el-checkbox>
+              <el-checkbox v-model="form.attachment_parse_enabled">附件解析</el-checkbox>
+          </el-form-item>
+          <el-form-item label="标的并发">
+              <el-input-number v-model="form.item_concurrency" :min="1" :max="20" />
+              <div class="small muted" style="margin-left:8px">建议：REST API 平台 5-10，浏览器平台 1-2</div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="dialogVisible=false">取消</el-button>
+          <el-button type="primary" @click="saveJob">保存</el-button>
+        </template>
+      </el-dialog>
+    </section>
+  `
+};
+
+const BatchesPage = {
+  components: { ErrorBox, StatusTag },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const rows = ref([]);
+    const total = ref(0);
+    const filters = reactive({ page: 1, size: 20, platform: "", status: "", from_date: "", to_date: "" });
+    async function refresh() {
+      await load(async () => {
+        const params = new URLSearchParams(filters);
+        const res = await apiRequest(`/api/batches?${params}`);
+        rows.value = res.items || [];
+        total.value = res.total || 0;
+      });
+    }
+    function onBatchFilterChange() { filters.page = 1; refresh(); }
+    function onBatchPageChange(pn) { filters.page = pn; refresh(); }
+    async function retry(row) {
+      try {
+        const res = await apiRequest(`/api/batches/${encodeURIComponent(row.batch_id)}/retry`, { method: "POST" });
+        ElMessage.success(res.message || "已触发重试");
+        refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "重试失败");
+      }
+    }
+    async function stopBatch(row) {
+      try {
+        await ElMessageBox.confirm(
+          `确定要停止批次 ${row.batch_id} 吗？这将终止该平台所有正在运行的采集进程。`,
+          "确认停止",
+          { confirmButtonText: "停止", cancelButtonText: "取消", type: "warning" }
+        );
+        const res = await apiRequest(`/api/batches/${encodeURIComponent(row.batch_id)}/stop`, { method: "POST" });
+        ElMessage.success(res.message || "已停止");
+        refresh();
+      } catch (err) {
+        if (err !== "cancel") ElMessage.error(err.message || "停止失败");
+      }
+    }
+    onMounted(refresh);
+    return { loading, error, rows, total, filters, PLATFORM_LABELS, refresh, retry, stopBatch, platformName, formatTime, textOf, onBatchFilterChange, onBatchPageChange };
+  },
+  template: `
+    <section>
+      <div class="page-title"><div><h1>批次管理</h1><p>查看每次采集执行结果和失败原因。</p></div><el-button @click="refresh" :loading="loading">刷新</el-button></div>
+      <ErrorBox :message="error" />
+      <div class="filters">
+        <el-select v-model="filters.platform" placeholder="来源平台" clearable @change="onBatchFilterChange"><el-option v-for="(label, key) in PLATFORM_LABELS" :key="key" :label="label" :value="key" /></el-select>
+        <el-select v-model="filters.status" placeholder="状态" clearable @change="onBatchFilterChange"><el-option label="success" value="success" /><el-option label="partial_success" value="partial_success" /><el-option label="failed" value="failed" /><el-option label="running" value="running" /></el-select>
+        <el-date-picker v-model="filters.from_date" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" @change="onBatchFilterChange" />
+        <el-date-picker v-model="filters.to_date" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" @change="onBatchFilterChange" />
+        <el-button @click="onBatchFilterChange">查询</el-button>
+      </div>
+      <div class="panel">
+        <el-table :data="rows" v-loading="loading" empty-text="暂无批次记录">
+          <el-table-column prop="batch_id" label="批次 ID" min-width="180" show-overflow-tooltip />
+          <el-table-column label="平台" width="120"><template #default="{row}">{{ platformName(row.source_platform) }}</template></el-table-column>
+          <el-table-column label="状态" width="120"><template #default="{row}"><StatusTag :value="row.status" /></template></el-table-column>
+          <el-table-column prop="item_count" label="标的数" width="90" />
+          <el-table-column prop="duration_seconds" label="耗时(秒)" width="100" />
+          <el-table-column prop="started_at" label="开始时间" width="170"><template #default="{row}">{{ formatTime(row.started_at) }}</template></el-table-column>
+          <el-table-column prop="finished_at" label="结束时间" width="170"><template #default="{row}">{{ formatTime(row.finished_at) }}</template></el-table-column>
+          <el-table-column prop="message" label="说明" min-width="220" show-overflow-tooltip />
+          <el-table-column label="操作" width="100" fixed="right"><template #default="{row}">
+            <template v-if="row.status === 'running'">
+              <el-button size="small" type="danger" @click="stopBatch(row)">停止</el-button>
+            </template>
+            <template v-else>
+              <el-button size="small" type="primary" @click="retry(row)">重试</el-button>
+            </template>
+          </template></el-table-column>
+        </el-table>
+        <div class="panel-body"><el-pagination layout="prev, pager, next, total" :total="total" :page-size="filters.size" v-model:current-page="filters.page" @current-change="onBatchPageChange" /></div>
+      </div>
+    </section>
+  `
+};
+
+const ItemsPage = {
+  components: { ErrorBox, StatusTag },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const rows = ref([]);
+    const total = ref(0);
+    const optionFilters = ref({ platforms: [], asset_groups: [], statuses: [] });
+    const filters = reactive({ page: 1, size: 20, platform: "", asset_group: "", status: "", keyword: "", price_min: 0, price_max: 0, missing: "" });
+
+    async function refresh() {
+      await load(async () => {
+        const params = new URLSearchParams({
+          page: filters.page,
+          size: filters.size,
+          platform: filters.platform,
+          asset_group: filters.asset_group,
+          status: filters.status,
+          keyword: filters.keyword,
+          price_min: filters.price_min || 0,
+          price_max: filters.price_max || 0
+        });
+        const res = await apiRequest(`/api/items?${params}`);
+        let items = res.items || [];
+        if (filters.missing === "final_price") items = items.filter(i => !i.final_price_display && !i.final_price_amount);
+        if (filters.missing === "location") items = items.filter(i => !i.asset_location);
+        rows.value = items;
+        total.value = filters.missing ? items.length : (res.total || 0);
+        optionFilters.value = res.filters || optionFilters.value;
+      });
+    }
+
+    function onFilterChange() {
+      filters.page = 1;
+      refresh();
+    }
+
+    function onPageChange(pn) {
+      filters.page = pn;
+      refresh();
+    }
+
+    function openDetail(row) {
+      router.push(`/items/${row.item_id}`);
+    }
+
+    onMounted(refresh);
+    return { loading, error, rows, total, filters, optionFilters, refresh, openDetail, platformName, formatTime, textOf, onFilterChange, onPageChange };
+  },
+  template: `
+    <section>
+      <div class="page-title"><div><h1>标的查看</h1><p>按来源平台、资产类型、状态和缺失情况筛选标的数据。</p></div><el-button @click="refresh" :loading="loading">刷新</el-button></div>
+      <ErrorBox :message="error" />
+      <div class="filters">
+        <el-select v-model="filters.platform" placeholder="来源平台" clearable @change="onFilterChange"><el-option v-for="p in optionFilters.platforms" :key="p" :label="platformName(p)" :value="p" /></el-select>
+        <el-select v-model="filters.asset_group" placeholder="资产类型" clearable @change="onFilterChange"><el-option v-for="g in optionFilters.asset_groups" :key="g.key" :label="g.label || g.key" :value="g.key" /></el-select>
+        <el-select v-model="filters.status" placeholder="项目状态" clearable @change="onFilterChange"><el-option v-for="s in optionFilters.statuses" :key="s" :label="s" :value="s" /></el-select>
+        <el-select v-model="filters.missing" placeholder="字段缺失" clearable @change="onFilterChange"><el-option label="最终价缺失" value="final_price" /><el-option label="所在地缺失" value="location" /></el-select>
+        <el-input class="wide" v-model="filters.keyword" clearable placeholder="项目名称或所在地" @keyup.enter="onFilterChange" />
+        <el-button @click="onFilterChange">查询</el-button>
+      </div>
+      <div class="panel">
+        <el-table :data="rows" v-loading="loading" empty-text="暂无标的数据">
+          <el-table-column label="标的 ID" width="105"><template #default="{row}"><span class="mono">{{ row.item_id }}</span></template></el-table-column>
+          <el-table-column prop="project_name" label="项目名称" min-width="280" show-overflow-tooltip />
+          <el-table-column label="来源" width="120"><template #default="{row}">{{ platformName(row.source_platform) }}</template></el-table-column>
+          <el-table-column label="类型" width="130"><template #default="{row}">{{ row.asset_group_label || row.asset_group }}</template></el-table-column>
+          <el-table-column label="状态" width="110"><template #default="{row}"><StatusTag :value="row.project_status" /></template></el-table-column>
+          <el-table-column prop="start_price_display" label="起拍价" width="130" />
+          <el-table-column prop="final_price_display" label="最终价" width="130" />
+          <el-table-column prop="asset_location" label="所在地" min-width="180" show-overflow-tooltip />
+          <el-table-column label="操作" width="100" fixed="right"><template #default="{row}"><el-button size="small" @click="openDetail(row)">详情</el-button></template></el-table-column>
+        </el-table>
+        <div class="panel-body"><el-pagination layout="prev, pager, next, total" :total="total" :page-size="filters.size" v-model:current-page="filters.page" @current-change="onPageChange" /></div>
+      </div>
+    </section>
+  `
+};
+
+const ItemDetailPage = {
+  components: { ErrorBox, StatusTag },
+  setup() {
+    const route = VueRouter.useRoute();
+    const { loading, error, load } = usePageLoader();
+    const data = ref(null);
+    const active = ref("common");
+    const previewItem = ref(null);       // 当前预览的资源对象
+    const previewVisible = ref(false);
+
+    async function refresh() {
+      await load(async () => {
+        data.value = await apiRequest(`/api/items/${route.params.id}`);
+      });
+    }
+
+    // 预览直链（图片/PDF/视频浏览器原生支持跨域加载）
+    function proxyUrl(res) {
+      if (!res || !res.resource_url) return "";
+      return res.resource_url;
+    }
+
+    // 下载走代理（添加 Content-Disposition: attachment header）
+    function downloadUrl(res) {
+      if (!res || !res.resource_id) return "";
+      return `/api/items/resource/${res.resource_id}/proxy?download=1`;
+    }
+
+    // 根据扩展名判断文件图标/类别
+    function getExt(name) {
+      if (!name) return "";
+      const i = name.lastIndexOf(".");
+      return i >= 0 ? name.slice(i).toLowerCase() : "";
+    }
+
+    function isImage(ext) {
+      return [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"].includes(ext);
+    }
+    function isPdf(ext) {
+      return ext === ".pdf";
+    }
+    function isVideo(ext) {
+      return [".mp4", ".webm", ".mov"].includes(ext);
+    }
+    function isOffice(ext) {
+      return [".xls", ".xlsx", ".doc", ".docx", ".ppt", ".pptx"].includes(ext);
+    }
+
+    // 分组资源
+    const groupedResources = computed(() => {
+      const all = (data.value?.resources || []).map(r => {
+        const ext = r.resource_format && r.resource_format.startsWith(".")
+          ? r.resource_format.toLowerCase()
+          : getExt(r.resource_name || r.resource_url || "");
+        return { ...r, _ext: ext };
+      });
+      return {
+        images: all.filter(r => r.resource_type === "image" || isImage(r._ext)),
+        videos: all.filter(r => r.resource_type === "video" || isVideo(r._ext)),
+        attachments: all.filter(r =>
+          r.resource_type === "attachment" || (!isImage(r._ext) && !isVideo(r._ext))
+        ),
+        total: all.length
+      };
+    });
+
+    function iconFor(r) {
+      const ext = r._ext;
+      if (isImage(ext)) return "PictureFilled";
+      if (isVideo(ext)) return "VideoCameraFilled";
+      if (isPdf(ext)) return "Document";
+      if (isOffice(ext)) return "Document";
+      return "Folder";
+    }
+
+    function iconColor(r) {
+      const ext = r._ext;
+      if (isImage(ext)) return "#409eff";
+      if (isVideo(ext)) return "#e6a23c";
+      if (isPdf(ext)) return "#f56c6c";
+      if (isOffice(ext)) return "#67c23a";
+      return "#909399";
+    }
+
+    function typeLabel(t) {
+      const m = { image: "图片", video: "视频", attachment: "附件" };
+      return m[t] || t;
+    }
+
+    function roleLabel(r) {
+      const m = {
+        site_image: "现场照片", vehicle_image: "车辆照片",
+        subject_image: "标的图片", announcement_file: "公告文件",
+        assessment_report: "评估报告", asset_list: "资产清单"
+      };
+      return m[r] || r || "";
+    }
+
+    function openPreview(res) {
+      previewItem.value = res;
+      previewVisible.value = true;
+    }
+
+    function closePreview() {
+      previewVisible.value = false;
+      previewItem.value = null;
+    }
+
+    // 格式化文件大小
+    function formatSize(bytes) {
+      if (!bytes) return "";
+      if (bytes < 1024) return bytes + " B";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+      return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+    }
+
+    const commonRows = computed(() => {
+      const item = data.value?.item || {};
+      return [
+        ["来源平台", platformName(item.source_platform)],
+        ["平台标的ID", item.source_item_id],
+        ["项目名称", item.project_name],
+        ["标的类型", item.asset_type],
+        ["资产类型", item.asset_group_label || item.asset_group],
+        ["项目状态", item.project_status],
+        ["拍卖阶段", item.auction_stage],
+        ["标的所在地", item.asset_location],
+        ["数据来源", item.data_source],
+        ["报名开始时间", formatTime(item.signup_start_time)],
+        ["报名截止时间", formatTime(item.signup_end_time)],
+        ["处置方", item.disposal_party],
+        ["处置机构", item.disposal_agency],
+        ["起拍价", item.start_price_display],
+        ["最终价", item.final_price_display],
+        ["联系方式", item.contact_info],
+        ["特别告知", item.special_notice],
+        ["评估价格及时间", item.assessment_price_display],
+        ["出价记录", item.bid_records_json],
+        ["来源页面", item.source_url ? (item.source_url.startsWith('http') ? `<a href="${item.source_url}" target="_blank" rel="noopener noreferrer" class="link">${item.source_url.length > 60 ? item.source_url.slice(0, 60) + '...' : item.source_url}</a>` : item.source_url) : "无"],
+        ["批次", item.batch_id],
+        ["最后采集", formatTime(item.last_crawled_at)]
+      ];
+    });
+    // 特有字段：以 asset_* 表列为基准，并合并 field_extractions 的 special 命名空间字段
+    // （对齐查看器 jd_viewer，补回因 v2 资产表列少于 SPECIAL_FIELDS 而缺失的特有字段）
+    const specialRows = computed(() => {
+      const table = fieldRows(data.value?.special || {});
+      const tableKeys = new Set(table.map(r => r.key));
+      const redundant = new Set();
+      if (tableKeys.has("building_area_sqm") || tableKeys.has("building_area_display")) {
+        redundant.add("building_area");
+      }
+      if (tableKeys.has("land_area_sqm") || tableKeys.has("land_area_display")) {
+        redundant.add("land_area");
+      }
+      if (tableKeys.has("building_area_display")) {
+        redundant.add("building_area_sqm");
+      }
+      if (tableKeys.has("land_area_display")) {
+        redundant.add("land_area_sqm");
+      }
+      const base = table.filter(r => !redundant.has(r.key));
+
+      // 来自 field_extractions 的特有字段（查看器的数据源），仅补充表列中不存在的
+      const extras = (data.value?.extractions || [])
+        .filter(e => String(e.field_namespace || "").startsWith("special") && e.status !== "rejected")
+        .map(e => ({
+          key: e.field_key,
+          label: e.field_label || fieldLabel(e.field_key),
+          value: e.display_value != null && e.display_value !== "" ? e.display_value : e.normalized_text
+        }))
+        .filter(e => e.value != null && e.value !== "" && !tableKeys.has(e.key));
+      return base.concat(extras);
+    });
+    onMounted(refresh);
+    return {
+      loading, error, data, active, commonRows, specialRows, router, refresh, textOf,
+      platformName, formatTime, fieldRows, fieldLabel, detailColumns,
+      groupedResources, iconFor, iconColor, typeLabel, roleLabel,
+      proxyUrl, downloadUrl, openPreview, closePreview,
+      previewItem, previewVisible, formatSize, isImage, isPdf, isVideo, isOffice
+    };
+  },
+  template: `
+    <section>
+      <div class="page-title">
+        <div>
+          <h1>{{ data?.item?.project_name || "标的详情" }}</h1>
+          <p v-if="data?.item">标的 ID：{{ data.item.item_id }}，来源：{{ platformName(data.item.source_platform) }}</p>
+        </div>
+        <div class="toolbar">
+          <el-button @click="router.back()">返回</el-button>
+          <el-button @click="refresh" :loading="loading">刷新</el-button>
+        </div>
+      </div>
+      <ErrorBox :message="error" />
+      <div v-if="!data && !loading" class="panel"><div class="empty">未找到标的</div></div>
+      <template v-if="data">
+        <el-tabs v-model="active" type="border-card">
+          <el-tab-pane label="共有字段" name="common">
+            <el-table :data="commonRows" border size="small">
+              <el-table-column prop="0" label="字段" width="180" />
+              <el-table-column label="值"><template #default="{row}"><span class="pre" style="display:block" v-if="row[0] !== '来源页面'">{{ textOf(row[1], "空") }}</span><span v-else class="pre" style="display:block" v-html="row[1] || '无'"></span></template></el-table-column>
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="特有字段" name="special">
+            <el-table :data="specialRows" border size="small" empty-text="暂无特有字段">
+              <el-table-column prop="label" label="字段" width="220" />
+              <el-table-column label="值"><template #default="{row}"><span class="pre" style="display:block">{{ textOf(row.value, "空") }}</span></template></el-table-column>
+            </el-table>
+          </el-tab-pane>
+
+          <!-- 资源附件 ── 可预览的卡片+列表布局 -->
+          <el-tab-pane label="资源附件" name="resources">
+            <div v-if="groupedResources.total === 0" style="text-align:center;padding:40px;color:var(--muted)">暂无资源</div>
+
+            <div v-else>
+              <!-- 图片区域 -->
+              <div v-if="groupedResources.images.length" style="margin-bottom:24px">
+                <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--primary)">🖼 图片 ({{ groupedResources.images.length }})</h4>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(160px, 1fr));gap:10px">
+                  <div v-for="img in groupedResources.images" :key="img.resource_id"
+                       style="border:1px solid var(--line);border-radius:6px;overflow:hidden;cursor:pointer;
+                              background:#fafafa;transition:box-shadow .2s"
+                       @mouseenter="$event.currentTarget.style.boxShadow='0 2px 12px rgba(0,0,0,.12)'"
+                       @mouseleave="$event.currentTarget.style.boxShadow='none'"
+                       @click="openPreview(img)">
+                    <div style="aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;
+                                background:#e8e8e8;overflow:hidden">
+                      <img :src="proxyUrl(img)" :alt="img.resource_name"
+                           style="width:100%;height:100%;object-fit:cover"
+                           @error="$event.target.style.display='none';$event.target.nextElementSibling.style.display='flex'"
+                           loading="lazy" />
+                      <el-icon :size="36" :color="iconColor(img)"
+                               style="display:none"><component :is="iconFor(img)" /></el-icon>
+                    </div>
+                    <div style="padding:6px 8px;font-size:12px;color:var(--muted);text-overflow:ellipsis;overflow:hidden;white-space:nowrap"
+                         :title="img.resource_name || img.resource_url">
+                      {{ img.resource_name || "未命名图片" }}
+                    </div>
+                    <div v-if="img.resource_role" style="padding:0 8px 6px;font-size:11px;color:var(--accent)">
+                      {{ roleLabel(img.resource_role) }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 视频区域 -->
+              <div v-if="groupedResources.videos.length" style="margin-bottom:24px">
+                <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--primary)">🎬 视频 ({{ groupedResources.videos.length }})</h4>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(200px, 1fr));gap:10px">
+                  <div v-for="vid in groupedResources.videos" :key="vid.resource_id"
+                       style="border:1px solid var(--line);border-radius:6px;overflow:hidden;cursor:pointer;
+                              background:#fafafa;transition:box-shadow .2s"
+                       @mouseenter="$event.currentTarget.style.boxShadow='0 2px 12px rgba(0,0,0,.12)'"
+                       @mouseleave="$event.currentTarget.style.boxShadow='none'"
+                       @click="openPreview(vid)">
+                    <div style="aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;
+                                background:#222;position:relative">
+                      <video v-if="false" :src="proxyUrl(vid)" style="width:100%;height:100%;object-fit:cover" />
+                      <div style="width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.25);
+                                  display:flex;align-items:center;justify-content:center">
+                        <span style="font-size:24px;color:#fff">▶</span>
+                      </div>
+                    </div>
+                    <div style="padding:6px 8px;font-size:12px;color:var(--muted);text-overflow:ellipsis;overflow:hidden;white-space:nowrap"
+                         :title="vid.resource_name || vid.resource_url">
+                      {{ vid.resource_name || "未命名视频" }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 附件区域 -->
+              <div v-if="groupedResources.attachments.length">
+                <h4 style="margin:0 0 12px 0;font-size:14px;color:var(--primary)">📎 附件 ({{ groupedResources.attachments.length }})</h4>
+                <el-table :data="groupedResources.attachments" border size="small">
+                  <el-table-column label="名称" min-width="260">
+                    <template #default="{row}">
+                      <div style="display:flex;align-items:center;gap:6px">
+                        <el-icon :color="iconColor(row)" :size="18"><component :is="iconFor(row)" /></el-icon>
+                        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                              :title="row.resource_name || row.resource_url">
+                          {{ row.resource_name || "未命名文件" }}
+                        </span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="格式" width="90">
+                    <template #default="{row}">{{ row._ext || (row.resource_format || "-") }}</template>
+                  </el-table-column>
+                  <el-table-column label="大小" width="90">
+                    <template #default="{row}">{{ formatSize(row.resource_size_bytes) || "-" }}</template>
+                  </el-table-column>
+                  <el-table-column label="来源" width="120">
+                    <template #default="{row}">
+                      <span v-if="row.resource_role" style="font-size:12px">{{ roleLabel(row.resource_role) || row.source_section }}</span>
+                      <span v-else style="font-size:12px;color:var(--muted)">{{ row.source_section || "-" }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="180" fixed="right">
+                    <template #default="{row}">
+                      <el-button size="small" text type="primary" @click="openPreview(row)">预览</el-button>
+                      <el-button size="small" text type="success">
+                        <a :href="downloadUrl(row)" target="_blank" style="color:inherit;text-decoration:none">下载</a>
+                      </el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="债权明细" name="debt">
+            <el-table :data="data.debt_details || []" border size="small" empty-text="暂无债权明细">
+              <el-table-column v-for="col in detailColumns(data.debt_details || [])" :key="col.key" :prop="col.key" :label="col.label" min-width="140" show-overflow-tooltip />
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="知产明细" name="ip">
+            <el-table :data="data.ip_details || []" border size="small" empty-text="暂无知识产权明细">
+              <el-table-column v-for="col in detailColumns(data.ip_details || [])" :key="col.key" :prop="col.key" :label="col.label" min-width="140" show-overflow-tooltip />
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="提取证据" name="evidence">
+            <el-table :data="data.extractions || []" border size="small" empty-text="暂无提取证据">
+              <el-table-column prop="field_namespace" label="字段分组" width="120" />
+              <el-table-column label="字段" width="180">
+                <template #default="{row}">{{ row.field_label || fieldLabel(row.field_key) }}</template>
+              </el-table-column>
+              <el-table-column prop="raw_value" label="原值" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="source_type" label="来源" width="120" />
+              <el-table-column prop="source_excerpt" label="证据片段" min-width="260" show-overflow-tooltip />
+              <el-table-column prop="confidence" label="置信度" width="90" />
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="原始数据" name="raw">
+            <pre class="pre">{{ JSON.stringify(data.raw || {}, null, 2) }}</pre>
+          </el-tab-pane>
+        </el-tabs>
+      </template>
+
+      <!-- 资源预览弹窗 -->
+      <el-dialog :model-value="previewVisible" :title="previewItem?.resource_name || '资源预览'"
+                 width="85%" top="2vh" @close="closePreview" @closed="closePreview" destroy-on-close>
+        <template v-if="previewItem">
+          <div style="margin-bottom:12px;font-size:13px;color:var(--muted)">
+            <span>类型：{{ typeLabel(previewItem.resource_type) }}</span>
+            <span v-if="previewItem._ext" style="margin-left:16px">格式：{{ previewItem._ext }}</span>
+            <span v-if="previewItem.resource_size_bytes" style="margin-left:16px">大小：{{ formatSize(previewItem.resource_size_bytes) }}</span>
+            <span v-if="previewItem.source_section" style="margin-left:16px">来源：{{ previewItem.source_section }}</span>
+          </div>
+
+          <!-- 图片预览 -->
+          <div v-if="isImage(previewItem._ext)" style="text-align:center;background:#f5f5f5;border-radius:8px;padding:12px">
+            <img :src="proxyUrl(previewItem)" style="max-width:100%;max-height:75vh;object-fit:contain;border-radius:4px"
+                 @error="$event.target.style.display='none'" />
+          </div>
+
+          <!-- PDF 预览 -->
+          <div v-else-if="isPdf(previewItem._ext)" style="background:#525659;border-radius:8px;overflow:hidden">
+            <iframe :src="proxyUrl(previewItem)"
+                    style="width:100%;height:75vh;border:none" />
+          </div>
+
+          <!-- 视频预览 -->
+          <div v-else-if="isVideo(previewItem._ext)" style="background:#000;border-radius:8px;overflow:hidden;text-align:center">
+            <video :src="proxyUrl(previewItem)" controls autoplay
+                   style="max-width:100%;max-height:75vh;border-radius:4px" />
+          </div>
+
+          <!-- 办公文档 / 其他附件 -->
+          <div v-else style="text-align:center;padding:40px 20px">
+            <el-icon :size="64" :color="iconColor(previewItem)"><Folder /></el-icon>
+            <p style="margin:16px 0 8px;font-size:15px;font-weight:600">{{ previewItem.resource_name || "未命名文件" }}</p>
+            <p style="margin:0 0 20px;font-size:13px;color:var(--muted)">
+              此文件类型暂不支持在线预览，请下载后查看
+            </p>
+            <el-button type="primary">
+              <a :href="downloadUrl(previewItem)" target="_blank" style="color:inherit;text-decoration:none">📥 下载文件</a>
+            </el-button>
+          </div>
+        </template>
+
+        <template #footer>
+          <el-button @click="closePreview">关闭</el-button>
+          <el-button type="primary">
+            <a :href="downloadUrl(previewItem)" target="_blank" style="color:inherit;text-decoration:none">下载</a>
+          </el-button>
+        </template>
+      </el-dialog>
+    </section>
+  `
+};
+
+const QueuesPage = {
+  components: { ErrorBox, StatusTag },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const stats = ref({});
+    const tasks = ref([]);
+    const total = ref(0);
+    const selectedIds = ref([]);
+    const filters = reactive({ page: 1, size: 20, status: "", platform: "", time_from: "", time_to: "" });
+    const concurrency = ref(3);
+    const autoConfig = reactive({ enabled: false, concurrency: 3, interval: 20, limit: 50 });
+    const profiles = ref([]);
+    const selectedProfile = ref("");
+    async function loadProfiles() {
+      try {
+        const rows = await apiRequest("/api/models/profiles");
+        profiles.value = rows || [];
+      } catch (e) {
+        profiles.value = [];
+      }
+    }
+    async function refresh() {
+      await load(async () => {
+        const params = new URLSearchParams(filters);
+        const [s, t] = await Promise.all([apiRequest("/api/queues/ai"), apiRequest(`/api/queues/ai/tasks?${params}`)]);
+        stats.value = s || {};
+        tasks.value = t.items || [];
+        total.value = t.total || 0;
+      });
+    }
+    async function loadAuto() {
+      try {
+        const cfg = await apiRequest("/api/queues/ai/auto");
+        if (cfg) {
+          Object.assign(autoConfig, cfg);
+          if (cfg.ai_profile !== undefined) selectedProfile.value = cfg.ai_profile || "";
+        }
+      } catch (e) { /* 忽略 */ }
+    }
+    async function saveAuto() {
+      try {
+        const cfg = await apiRequest("/api/queues/ai/auto", {
+          method: "POST",
+          body: JSON.stringify({
+            enabled: autoConfig.enabled,
+            concurrency: autoConfig.concurrency,
+            interval: autoConfig.interval,
+            limit: autoConfig.limit,
+            ai_profile: selectedProfile.value || "",
+          }),
+        });
+        if (cfg) Object.assign(autoConfig, cfg);
+        ElMessage.success(autoConfig.enabled ? "已开启自动处理" : "已关闭自动处理");
+      } catch (err) {
+        ElMessage.error(err.message || "保存失败");
+      }
+    }
+    function onQueueFilterChange() {
+      filters.page = 1;
+      refresh();
+    }
+    function onQueuePageChange(pn) {
+      filters.page = pn;
+      refresh();
+    }
+    async function processQueue() {
+      try {
+        const params = new URLSearchParams({
+          limit: "20",
+          concurrency: String(concurrency.value),
+        });
+        if (selectedProfile.value) params.set("ai_profile", selectedProfile.value);
+        const res = await apiRequest(`/api/queues/ai/process?${params}`, { method: "POST" });
+        const workerCount = Array.isArray(res.task_ids) ? res.task_ids.length : 1;
+        ElMessage.success(res.message || `已触发处理（${workerCount} 个 worker）`);
+        await refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "操作失败");
+      }
+    }
+    async function action(url, message) {
+      try {
+        const res = await apiRequest(url, { method: "POST" });
+        ElMessage.success(res.message || message);
+        await refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "操作失败");
+      }
+    }
+    async function retrySelected() {
+      if (!selectedIds.value.length) { ElMessage.warning("请先选择要重试的任务"); return; }
+      for (const id of selectedIds.value) {
+        await apiRequest(`/api/queues/ai/retry?item_id=${id}`, { method: "POST" });
+      }
+      ElMessage.success(`已重置 ${selectedIds.value.length} 条选中任务`);
+      selectedIds.value = [];
+      await refresh();
+    }
+    async function retryFiltered() {
+      const params = new URLSearchParams({ status: filters.status || "failed" });
+      if (filters.platform) params.set("platform", filters.platform);
+      if (filters.time_from) params.set("time_from", filters.time_from);
+      if (filters.time_to) params.set("time_to", filters.time_to);
+      const res = await apiRequest(`/api/queues/ai/retry?${params}`, { method: "POST" });
+      ElMessage.success(`已重置 ${res.updated} 条任务`);
+      await refresh();
+    }
+    function filteredQueueParams(includeStatus = true) {
+      const params = new URLSearchParams();
+      if (includeStatus && filters.status) params.set("status", filters.status);
+      if (filters.platform) params.set("platform", filters.platform);
+      if (filters.time_from) params.set("time_from", filters.time_from);
+      if (filters.time_to) params.set("time_to", filters.time_to);
+      return params;
+    }
+    async function pausePendingRunning() {
+      try {
+        const includeStatus = filters.status === "pending" || filters.status === "running";
+        const params = filteredQueueParams(includeStatus);
+        const res = await apiRequest(`/api/queues/ai/pause?${params}`, { method: "POST" });
+        ElMessage.success(`已暂停 ${res.updated || 0} 条未解析任务`);
+        await refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "暂停失败");
+      }
+    }
+    async function resumePaused() {
+      try {
+        const params = filteredQueueParams(false);
+        const res = await apiRequest(`/api/queues/ai/resume?${params}`, { method: "POST" });
+        ElMessage.success(`已恢复 ${res.updated || 0} 条暂停任务`);
+        await refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "恢复失败");
+      }
+    }
+    function selectionChange(sel) { selectedIds.value = sel.map((r) => r.ai_task_id || r.queue_id); }
+    function modelText(row) {
+      const profile = row.running_profile_name || "";
+      const detail = [row.running_provider, row.running_model_name].filter(Boolean).join(" / ");
+      if (profile && detail) return `${profile}\n${detail}`;
+      return profile || detail || "-";
+    }
+    function aiErrorMsg(msg) {
+      if (!msg) return "-";
+      const s = String(msg);
+      if (s.includes("401") || s.includes("Unauthorized") || s.includes("api_key")) return { icon: "🔑", text: "API Key 无效或未授权" };
+      if (s.includes("429") || s.includes("rate") || s.includes("quota") || s.includes("limit")) return { icon: "💰", text: "API 额度耗尽或请求频率限制" };
+      if (s.includes("timeout") || s.includes("Timeout") || s.includes("timed out")) return { icon: "⏱️", text: "AI 调用超时" };
+      if (s.includes("JSON") || s.includes("parse") || s.includes("format")) return { icon: "🔧", text: "AI 返回格式异常" };
+      if (s.includes("Connection") || s.includes("connection")) return { icon: "🔌", text: "网络连接失败" };
+      return { icon: "⚠️", text: s.slice(0, 80) };
+    }
+    const checkpoints = ref([]);
+    async function loadCheckpoints() {
+      try { const r = await apiRequest("/api/queues/crawl/checkpoints"); checkpoints.value = r.items || []; }
+      catch (e) { checkpoints.value = []; }
+    }
+    onMounted(() => { loadProfiles(); refresh(); loadAuto(); loadCheckpoints(); });
+    return { loading, error, stats, tasks, total, filters, refresh, action, formatTime, textOf, onQueueFilterChange, onQueuePageChange, concurrency, autoConfig, profiles, selectedProfile, processQueue, saveAuto, retrySelected, retryFiltered, pausePendingRunning, resumePaused, selectionChange, selectedIds, aiErrorMsg, modelText, checkpoints, loadCheckpoints, PLATFORM_LABELS };
+  },
+  template: `
+    <section>
+      <div class="page-title"><div><h1>队列管理</h1><p>查看 AI、OCR、附件解析等异步任务处理状态。</p></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <el-button @click="refresh" :loading="loading">刷新</el-button>
+          <el-select v-model="selectedProfile" placeholder="模型配置（空=自动分配）" clearable style="width:180px">
+            <el-option label="自动分配（按适用任务）" value="" />
+            <el-option
+              v-for="profile in profiles"
+              :key="profile.profile_name"
+              :label="profile.profile_name + (profile.is_default ? '（默认）' : '')"
+              :value="profile.profile_name"
+              :disabled="!profile.enabled"
+            />
+          </el-select>
+          <el-tooltip
+            content="按模型策略触发后台解析，最多领取 20 个候选任务；实际并发由右侧并发控制。重复点击会启动新的后台 worker。"
+            placement="top"
+          >
+            <el-button type="primary" plain @click="processQueue">启动 AI 解析</el-button>
+          </el-tooltip>
+          <el-button @click="pausePendingRunning" type="warning" plain>暂停未解析任务</el-button>
+          <el-button @click="resumePaused" plain>恢复暂停任务</el-button>
+          <el-button @click="retryFiltered" type="warning" plain>重试当前筛选失败</el-button>
+          <el-button @click="retrySelected" type="warning" plain :disabled="!selectedIds.length">重试选中项 ({{ selectedIds.length }})</el-button>
+          <el-button @click="action('/api/queues/ai/unlock-stale?minutes=5', '已解锁超时任务')">解锁卡住任务</el-button>
+          <span style="flex:1"></span>
+          <span style="display:inline-flex;align-items:center;gap:4px">并发
+            <el-input-number v-model="concurrency" :min="1" :max="10" size="small" controls-position="right" style="width:90px" />
+          </span>
+          <span style="display:inline-flex;align-items:center;gap:4px">自动并发
+            <el-input-number v-model="autoConfig.concurrency" :min="1" :max="20" size="small" controls-position="right" style="width:90px" @change="saveAuto" />
+          </span>
+          <el-switch v-model="autoConfig.enabled" active-text="自动处理" inactive-text="手动" @change="saveAuto" />
+        </div>
+      </div>
+      <ErrorBox :message="error" />
+      <div class="metrics">
+        <div class="metric"><div class="label">待处理</div><div class="value">{{ stats.pending || 0 }}</div></div>
+        <div class="metric"><div class="label">运行中</div><div class="value">{{ stats.running || 0 }}</div></div>
+        <div class="metric"><div class="label">实际解析中</div><div class="value">{{ stats.parsing || 0 }}</div></div>
+        <div class="metric"><div class="label">已暂停</div><div class="value">{{ stats.paused || 0 }}</div></div>
+        <div class="metric"><div class="label">成功</div><div class="value">{{ stats.success || 0 }}</div></div>
+        <div class="metric" style="cursor:pointer" @click="filters.status='failed';onQueueFilterChange()"><div class="label">失败</div><div class="value" :style="{color: stats.failed > 0 ? '#e74c3c' : ''}">{{ stats.failed || 0 }}</div></div>
+      </div>
+      <div class="filters">
+        <el-select v-model="filters.status" placeholder="队列状态" clearable @change="onQueueFilterChange" style="width:130px">
+          <el-option label="pending" value="pending" /><el-option label="running" value="running" /><el-option label="parsing" value="parsing" /><el-option label="paused" value="paused" /><el-option label="success" value="success" /><el-option label="failed" value="failed" />
+        </el-select>
+        <el-select v-model="filters.platform" placeholder="平台" clearable @change="onQueueFilterChange" style="width:120px">
+          <el-option label="全部平台" value="" />
+          <el-option label="重庆产权" value="cquae" />
+          <el-option label="天津产权" value="tpre" />
+          <el-option label="山东产权" value="sdcqjy" />
+          <el-option label="贵州阳光" value="prechina" />
+          <el-option label="广西联合" value="gxcq" />
+          <el-option label="北京产权" value="cbex" />
+          <el-option label="e交易" value="ejy365" />
+          <el-option label="京东拍卖" value="jd" />
+          <el-option label="阿里拍卖" value="ali" />
+        </el-select>
+        <el-date-picker v-model="filters.time_from" type="date" placeholder="开始日期" value-format="YYYY-MM-DD" style="width:150px" @change="onQueueFilterChange" />
+        <el-date-picker v-model="filters.time_to" type="date" placeholder="结束日期" value-format="YYYY-MM-DD" style="width:150px" @change="onQueueFilterChange" />
+      </div>
+      <div class="panel">
+        <el-table :data="tasks" v-loading="loading" empty-text="暂无队列任务" @selection-change="selectionChange">
+          <el-table-column type="selection" width="40" />
+          <el-table-column prop="queue_id" label="ID" width="70" />
+          <el-table-column prop="source_platform" label="平台" width="80" />
+          <el-table-column prop="project_name" label="项目" min-width="200" show-overflow-tooltip />
+          <el-table-column label="状态" width="100"><template #default="{row}"><StatusTag :value="row.queue_status" /></template></el-table-column>
+          <el-table-column label="处理模型" width="180" show-overflow-tooltip>
+            <template #default="{row}"><span style="white-space:pre-line">{{ modelText(row) }}</span></template>
+          </el-table-column>
+          <el-table-column prop="retry_count" label="重试" width="60" />
+          <el-table-column prop="locked_by" label="锁定者" width="100" />
+          <el-table-column label="错误原因" min-width="240" show-overflow-tooltip>
+            <template #default="{row}">
+              <span v-if="row.queue_status === 'failed' && (row.last_error || row.error_message)">
+                <span>{{ aiErrorMsg(row.last_error || row.error_message).icon }}</span>
+                <span>{{ aiErrorMsg(row.last_error || row.error_message).text }}</span>
+              </span>
+              <span v-else class="muted">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="created_at" label="创建时间" width="160"><template #default="{row}">{{ formatTime(row.created_at) }}</template></el-table-column>
+        </el-table>
+        <div class="panel-body"><el-pagination layout="prev, pager, next, total" :total="total" :page-size="filters.size" v-model:current-page="filters.page" @current-change="onQueuePageChange" /></div>
+      </div>
+      <div class="section" style="margin-top:14px">
+        <h2 style="display:flex;justify-content:space-between;align-items:center">
+          <span>📌 采集断点</span>
+          <el-button size="small" @click="loadCheckpoints">刷新</el-button>
+        </h2>
+        <el-table :data="checkpoints" v-loading="loading" empty-text="暂无断点记录" size="small">
+          <el-table-column prop="source_platform" label="平台" width="100"><template #default="{row}">{{ PLATFORM_LABELS[row.source_platform] || row.source_platform }}</template></el-table-column>
+          <el-table-column prop="category_key" label="分类" width="90" />
+          <el-table-column prop="total_items_seen" label="已处理" width="80" />
+          <el-table-column prop="current_page" label="当前页" width="70" />
+          <el-table-column prop="last_item_id" label="最后标的" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="started_at" label="首次采集" width="160"><template #default="{row}">{{ formatTime(row.started_at) }}</template></el-table-column>
+          <el-table-column prop="updated_at" label="最后更新" width="160"><template #default="{row}">{{ formatTime(row.updated_at) }}</template></el-table-column>
+        </el-table>
+      </div>
+    </section>
+  `
+};
+
+const CrawlQueuePage = {
+  components: { ErrorBox, StatusTag },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const stats = ref({});
+    const tasks = ref([]);
+    const total = ref(0);
+    const selectedIds = ref([]);
+    const errorStats = ref([]);
+    const filters = reactive({ page: 1, size: 20, status: "", batch_id: "" });
+    const retrying = ref(false);
+
+    async function refresh() {
+      await load(async () => {
+        const params = new URLSearchParams(filters);
+        const esParams = new URLSearchParams(filters.batch_id ? { batch_id: filters.batch_id } : {});
+        const [s, t, es] = await Promise.all([
+          apiRequest("/api/queues/crawl"),
+          apiRequest(`/api/queues/crawl/tasks?${params}`),
+          apiRequest(`/api/queues/crawl/error-stats?${esParams}`),
+        ]);
+        stats.value = s || {};
+        tasks.value = t.items || [];
+        total.value = t.total || 0;
+        errorStats.value = es.items || [];
+      });
+    }
+
+    function onFilterChange() { filters.page = 1; refresh(); }
+    function onPageChange(pn) { filters.page = pn; refresh(); }
+
+    function formatErrorMsg(msg) {
+      if (!msg || msg === "-") return "-";
+      const s = String(msg);
+      if (s.includes("521") || s.includes("WAF") || s.includes("__jsl_clearance") || s.includes("knownsec"))
+        return { icon: "🛡️", text: "网站WAF拦截，需启用浏览器渲染模式重试" };
+      if (s.includes("Timeout") || s.includes("timed out") || s.includes("timeout"))
+        return { icon: "⏱️", text: "请求超时，网络不稳定或目标站响应慢" };
+      if (s.includes("ConnectionError") || s.includes("connection refused") || s.includes("reset"))
+        return { icon: "🔌", text: "网络连接失败，目标站不可达" };
+      if (s.includes("404") || s.includes("Not Found"))
+        return { icon: "📄", text: "页面不存在(404)，链接已失效" };
+      if (s.includes("JSONDecode") || s.includes("Expecting value") || s.includes("parse"))
+        return { icon: "🔧", text: "接口返回格式异常，预期JSON但收到HTML" };
+      if (s.includes("403") || s.includes("Forbidden"))
+        return { icon: "🚫", text: "访问被拒绝(403)，IP可能被封" };
+      if (s.includes("502") || s.includes("503") || s.includes("Bad Gateway"))
+        return { icon: "💔", text: "目标站服务暂时不可用(502/503)" };
+      if (s.includes("NoSuchElement") || s.includes("Element not found"))
+        return { icon: "🧩", text: "页面结构变化，特定元素未找到" };
+      return { icon: "⚠️", text: s.slice(0, 100) };
+    }
+
+    function changedTip(row) {
+      if (!row.changed_fields_json) return [];
+      try {
+        const arr = JSON.parse(row.changed_fields_json);
+        if (Array.isArray(arr) && arr.length > 0 && arr[0].field) return arr;
+        return arr.map((x) => ({ field: typeof x === "string" ? x : x.field, old: x.old, new: x.new }));
+      } catch (e) { return []; }
+    }
+
+    async function retryFailed() {
+      retrying.value = true;
+      try {
+        const params = new URLSearchParams({ status: "failed" });
+        if (filters.batch_id) params.set("batch_id", filters.batch_id);
+        const r = await apiRequest(`/api/queues/crawl/retry?${params}`, { method: "POST" });
+        ElMessage.success(`已重置 ${r.updated} 条失败任务为待采集`);
+        refresh();
+      } catch (e) {
+        ElMessage.error("重试失败: " + e);
+      }
+      retrying.value = false;
+    }
+
+    async function retrySelected() {
+      if (!selectedIds.value.length) { ElMessage.warning("请先选择要重试的任务"); return; }
+      retrying.value = true;
+      try {
+        let count = 0;
+        for (const id of selectedIds.value) {
+          const r = await apiRequest(`/api/queues/crawl/retry?item_id=${id}`, { method: "POST" });
+          count += r.updated || 0;
+        }
+        ElMessage.success(`已重置 ${count} 条选中任务为待采集`);
+        selectedIds.value = [];
+        refresh();
+      } catch (e) {
+        ElMessage.error("重试失败: " + e);
+      }
+      retrying.value = false;
+    }
+
+    function selectionChange(sel) { selectedIds.value = sel.map((r) => r.queue_id); }
+
+    onMounted(() => { refresh(); });
+    return {
+      loading, error, stats, tasks, total, filters, refresh, formatTime,
+      formatErrorMsg, changedTip, onFilterChange, onPageChange,
+      retryFailed, retrySelected, retrying, selectionChange, errorStats, selectedIds,
+    };
+  },
+  template: `
+    <section>
+      <div class="page-title"><div><h1>采集队列</h1><p>按批次查看标级采集结果。选中失败任务后可重试，错误原因已自动分类。</p></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <el-button @click="refresh" :loading="loading" size="default">刷新</el-button>
+          <el-button @click="retryFailed" :loading="retrying" type="warning" :disabled="!stats.failed" size="default">重试全部失败 ({{ stats.failed || 0 }})</el-button>
+          <el-button @click="retrySelected" :loading="retrying" type="warning" :disabled="!selectedIds.length" plain size="default">重试选中项 ({{ selectedIds.length }})</el-button>
+        </div>
+      </div>
+      <ErrorBox :message="error" />
+      <div class="metrics">
+        <div class="metric"><div class="label">成功(新增)</div><div class="value">{{ stats.success || 0 }}</div></div>
+        <div class="metric"><div class="label">等待AI</div><div class="value">{{ stats.pending_ai || 0 }}</div></div>
+        <div class="metric"><div class="label">更新(重复变化)</div><div class="value">{{ stats.updated || 0 }}</div></div>
+        <div class="metric"><div class="label">未变化</div><div class="value">{{ stats.unchanged || 0 }}</div></div>
+        <div class="metric" style="cursor:pointer" @click="filters.status='failed';onFilterChange()"><div class="label">失败</div><div class="value" :style="{color: stats.failed > 0 ? '#e74c3c' : ''}">{{ stats.failed || 0 }}</div></div>
+        <div class="metric"><div class="label">合计</div><div class="value">{{ stats.total || 0 }}</div></div>
+      </div>
+      <div v-if="errorStats.length > 0" class="metrics" style="margin-top:6px;font-size:13px">
+        <div class="metric" v-for="es in errorStats.slice(0,5)" :key="es.last_error" style="padding:6px 10px">
+          <div class="label">{{ formatErrorMsg(es.last_error).icon }} {{ formatErrorMsg(es.last_error).text.slice(0,30) }}</div>
+          <div class="value">{{ es.cnt }}</div>
+        </div>
+      </div>
+      <div class="filters">
+        <el-input v-model="filters.batch_id" placeholder="按批次ID筛选" clearable style="width:240px" @change="onFilterChange" />
+        <el-select v-model="filters.status" placeholder="采集状态" clearable @change="onFilterChange">
+          <el-option label="待采集" value="pending" />
+          <el-option label="等待AI" value="pending_ai" />
+          <el-option label="采集中" value="running" />
+          <el-option label="成功" value="success" />
+          <el-option label="失败" value="failed" />
+          <el-option label="已更新" value="updated" />
+          <el-option label="无变化" value="unchanged" />
+          <el-option label="跳过" value="skipped" />
+        </el-select>
+      </div>
+      <div class="panel">
+        <el-table :data="tasks" v-loading="loading" empty-text="暂无采集队列数据" @selection-change="selectionChange">
+          <el-table-column type="selection" width="40" />
+          <el-table-column prop="queue_id" label="ID" width="70" />
+          <el-table-column prop="source_platform" label="平台" width="90" />
+          <el-table-column prop="project_name" label="项目" min-width="200" show-overflow-tooltip />
+          <el-table-column prop="asset_group_label" label="类型" width="100" />
+          <el-table-column label="状态" width="100"><template #default="{row}"><StatusTag :value="row.status" /></template></el-table-column>
+          <el-table-column prop="batch_id" label="批次" width="160" show-overflow-tooltip />
+          <el-table-column label="变化字段" min-width="200" show-overflow-tooltip>
+            <template #default="{row}">
+              <template v-if="changedTip(row).length > 0">
+                <el-tag v-for="c in changedTip(row).slice(0,3)" :key="c.field" size="small" style="margin:1px">
+                  {{ c.field }}<template v-if="c.old !== undefined">: {{ c.old }} → {{ c.new }}</template>
+                </el-tag>
+                <span v-if="changedTip(row).length > 3" class="muted"> +{{ changedTip(row).length - 3 }}</span>
+              </template>
+              <span v-else class="muted">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="错误原因" min-width="220" show-overflow-tooltip>
+            <template #default="{row}">
+              <span v-if="row.status === 'failed' && row.error_message">
+                <span>{{ formatErrorMsg(row.error_message).icon }}</span>
+                <span>{{ formatErrorMsg(row.error_message).text }}</span>
+              </span>
+              <span v-else class="muted">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="100" fixed="right">
+            <template #default="{row}">
+              <el-button v-if="row.status === 'failed'" size="small" type="warning" plain @click="filters.status='failed';filters.batch_id=row.batch_id;onFilterChange()">重试</el-button>
+            </template>
+          </el-table-column>
+          <el-table-column prop="created_at" label="入队时间" width="160"><template #default="{row}">{{ formatTime(row.created_at) }}</template></el-table-column>
+        </el-table>
+        <div class="panel-body"><el-pagination layout="prev, pager, next, total" :total="total" :page-size="filters.size" v-model:current-page="filters.page" @current-change="onPageChange" /></div>
+      </div>
+    </section>
+  `
+};
+
+// ── 模型配置管理页面（CRUD） ──
+const ModelConfigPage = {
+  components: { ErrorBox },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const profiles = ref([]);
+    const providers = ref([]);
+    const dialogVisible = ref(false);
+    const saving = ref(false);
+    const isEdit = ref(false);
+    const testResult = ref(null);
+    const testing = ref(false);
+    const taskTypeOptions = [
+      { label: "常规文本", value: "text" },
+      { label: "长公告", value: "long_text" },
+      { label: "债权", value: "debt" },
+      { label: "视觉 OCR", value: "vision" },
+      { label: "附件解析", value: "attachment" },
+    ];
+
+    const form = reactive({
+      profile_name: "", provider: "deepseek", model_name: "",
+      vision_model_name: "", base_url: "", api_key_value: "",
+      timeout_seconds: 0, max_retries: 0, qps: 10,
+      max_concurrency: null, task_types: [], priority: 100,
+      enabled: 1, is_default: 0, note: ""
+    });
+
+    const formRules = {
+      profile_name: [{ required: true, message: "请输入配置名称", trigger: "blur" }],
+      provider: [{ required: true, message: "请选择供应商", trigger: "change" }]
+    };
+
+    const formRef = ref(null);
+
+    async function refresh() {
+      await load(async () => {
+        const [p, provs] = await Promise.all([
+          apiRequest("/api/models/profiles"),
+          apiRequest("/api/models/providers")
+        ]);
+        profiles.value = p;
+        providers.value = provs;
+      });
+    }
+
+    function resetForm() {
+      Object.assign(form, {
+        profile_name: "", provider: "deepseek", model_name: "",
+        vision_model_name: "", base_url: "", api_key_value: "",
+        timeout_seconds: 0, max_retries: 0, qps: 10,
+        max_concurrency: null, task_types: [], priority: 100,
+        enabled: 1, is_default: 0, note: ""
+      });
+      testResult.value = null;
+    }
+
+    function openCreate() {
+      resetForm();
+      isEdit.value = false;
+      dialogVisible.value = true;
+    }
+
+    function openEdit(row) {
+      resetForm();
+      Object.assign(form, {
+        profile_name: row.profile_name,
+        provider: row.provider || "",
+        model_name: row.model_name || "",
+        vision_model_name: row.vision_model_name || "",
+        base_url: row.base_url || "",
+        api_key_value: "",
+        timeout_seconds: row.timeout_seconds || 0,
+        max_retries: row.max_retries || 0,
+        qps: row.qps || 10,
+        max_concurrency: row.max_concurrency ?? null,
+        task_types: Array.isArray(row.task_types) ? row.task_types : [],
+        priority: row.priority ?? 100,
+        enabled: row.enabled ?? 1,
+        is_default: row.is_default ?? 0,
+        note: row.note || ""
+      });
+      isEdit.value = true;
+      dialogVisible.value = true;
+    }
+
+    async function submitForm() {
+      try {
+        await formRef.value.validate();
+      } catch { return; }
+      saving.value = true;
+      try {
+        const url = isEdit.value
+          ? `/api/models/profiles/${encodeURIComponent(form.profile_name)}`
+          : "/api/models/profiles";
+        const method = isEdit.value ? "PUT" : "POST";
+        const body = { ...form };
+        if (isEdit.value) delete body.profile_name;
+        if (!body.api_key_value) delete body.api_key_value;
+        await apiRequest(url, { method, body: JSON.stringify(body) });
+        dialogVisible.value = false;
+        ElMessage.success(isEdit.value ? "修改成功" : "创建成功");
+        refresh();
+      } catch (err) {
+        ElMessage.error(err.message || String(err));
+      } finally {
+        saving.value = false;
+      }
+    }
+
+    async function deleteProfile(row) {
+      try {
+        await ElMessageBox.confirm(`确定删除配置 "${row.profile_name}"？`, "删除确认", { type: "warning" });
+      } catch { return; }
+      await load(async () => {
+        await apiRequest(`/api/models/profiles/${encodeURIComponent(row.profile_name)}`, { method: "DELETE" });
+        ElMessage.success("已删除");
+        refresh();
+      });
+    }
+
+    async function activate(row) {
+      await load(async () => {
+        await apiRequest(`/api/models/profiles/${encodeURIComponent(row.profile_name)}/activate`, { method: "POST" });
+        ElMessage.success(`已激活 ${row.profile_name}`);
+        refresh();
+      });
+    }
+
+    async function testConnection() {
+      // 编辑模式下 api_key_value 可能为空（留空不修改），允许仅测试已有配置
+      if (!form.provider || !form.model_name) {
+        ElMessage.warning("请填写 Provider 和模型名称");
+        return;
+      }
+      if (!isEdit.value && !form.api_key_value) {
+        ElMessage.warning("新建时请填写 API Key");
+        return;
+      }
+      testing.value = true;
+      testResult.value = { ok: null, message: "正在测试连接..." };
+      try {
+        const payload = {
+          provider: form.provider,
+          model_name: form.model_name,
+          api_key: form.api_key_value,
+          base_url: form.base_url || "",
+          profile_name: form.profile_name || ""
+        };
+        console.log("[testConnection] payload:", { ...payload, api_key: "***" });
+        const result = await apiRequest("/api/models/test-connection", {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
+        console.log("[testConnection] result:", result);
+        testResult.value = { ok: !!result.ok, message: result.message || "测试完成", sample: result.sample || null };
+      } catch (err) {
+        console.error("[testConnection] error:", err);
+        const msg = (err && err.message) ? err.message : String(err);
+        testResult.value = { ok: false, message: "请求异常: " + msg };
+      } finally {
+        testing.value = false;
+      }
+    }
+
+    onMounted(refresh);
+    return { loading, error, profiles, providers, dialogVisible, saving, isEdit,
+             form, formRules, formRef, testResult, testing, taskTypeOptions,
+             refresh, openCreate, openEdit, submitForm, deleteProfile, activate,
+             testConnection, formatTime
+           };
+  },
+  template: `
+    <section>
+      <div class="page-title">
+        <div><h1>模型配置管理</h1><p>管理 AI 大模型接入配置：创建、编辑、测试和激活模型 profile。</p></div>
+        <div style="display:flex;gap:8px">
+          <el-button @click="refresh" :loading="loading">刷新</el-button>
+          <el-button type="primary" @click="openCreate">新建配置</el-button>
+        </div>
+      </div>
+      <ErrorBox :message="error" />
+
+      <div class="panel">
+        <el-table :data="profiles" v-loading="loading" empty-text="暂无模型配置，点击「新建配置」创建">
+          <el-table-column label="默认" width="70">
+            <template #default="{row}">
+              <span v-if="row.is_default" style="color:#15803d;font-weight:700">默认</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="profile_name" label="配置名称" min-width="150" />
+          <el-table-column label="供应商" width="110">
+            <template #default="{row}">{{ row.provider || "-" }}</template>
+          </el-table-column>
+          <el-table-column prop="model_name" label="文本模型" min-width="170" show-overflow-tooltip />
+          <el-table-column prop="vision_model_name" label="视觉模型" min-width="150" show-overflow-tooltip />
+          <el-table-column label="API Key" width="90">
+            <template #default="{row}">
+              <el-tag size="small" :type="row.has_api_key ? 'success' : 'info'">{{ row.has_api_key ? "已配置" : "未配置" }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="并发上限" width="90">
+            <template #default="{row}">{{ row.max_concurrency || "按任务" }}</template>
+          </el-table-column>
+          <el-table-column label="适用任务" min-width="160" show-overflow-tooltip>
+            <template #default="{row}">
+              <span v-if="row.task_types && row.task_types.length">{{ row.task_types.join(" / ") }}</span>
+              <span v-else class="muted">通用</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="priority" label="优先级" width="80" />
+          <el-table-column label="启用" width="70">
+            <template #default="{row}">
+              <el-tag size="small" :type="row.enabled ? 'success' : 'danger'">{{ row.enabled ? "是" : "否" }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="note" label="备注" min-width="140" show-overflow-tooltip />
+          <el-table-column prop="updated_at" label="更新时间" width="170">
+            <template #default="{row}">{{ formatTime(row.updated_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="260" fixed="right">
+            <template #default="{row}">
+              <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+                <el-button size="small" type="primary" link @click="openEdit(row)">编辑</el-button>
+                <el-button size="small" :type="row.is_default?'info':'success'" :disabled="row.is_default" link @click="activate(row)">
+                  {{ row.is_default ? "已激活" : "激活" }}
+                </el-button>
+                <el-button size="small" type="danger" link @click="deleteProfile(row)">删除</el-button>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <!-- 新建/编辑弹窗 -->
+      <el-dialog :model-value="dialogVisible" :title="isEdit ? '编辑模型配置' : '新建模型配置'"
+                 width="620px" @close="dialogVisible = false" @closed="dialogVisible = false">
+        <el-form ref="formRef" :model="form" :rules="formRules" label-width="110px" size="default">
+          <el-form-item label="配置名称" prop="profile_name">
+            <el-input v-model="form.profile_name" :disabled="isEdit" placeholder="如 deepseek_default, qwen_pro" />
+          </el-form-item>
+          <el-form-item label="供应商" prop="provider">
+            <el-select v-model="form.provider" style="width:100%">
+              <el-option v-for="p in providers" :key="p.key" :label="p.label" :value="p.key" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="文本模型">
+            <el-input v-model="form.model_name" placeholder="如 deepseek-v4-flash, qwen-plus" />
+          </el-form-item>
+          <el-form-item label="视觉模型">
+            <el-input v-model="form.vision_model_name" placeholder="如 deepseek-v4-flash, qwen-vl-plus" />
+          </el-form-item>
+          <el-form-item label="Base URL">
+            <el-input v-model="form.base_url" placeholder="如 https://dashscope.aliyuncs.com" />
+          </el-form-item>
+          <el-form-item label="API Key">
+            <el-input v-model="form.api_key_value" type="password" show-password
+                      :placeholder="isEdit ? '留空则不修改' : 'sk-...'" />
+          </el-form-item>
+          <el-row :gutter="12">
+            <el-col :span="8">
+              <el-form-item label="超时秒数" label-width="90px">
+                <el-input-number v-model="form.timeout_seconds" :min="0" :step="10" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="重试次数" label-width="90px">
+                <el-input-number v-model="form.max_retries" :min="0" :step="1" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="QPS" label-width="60px">
+                <el-input-number v-model="form.qps" :min="1" :step="1" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="12">
+            <el-col :span="8">
+              <el-form-item label="并发上限" label-width="90px">
+                <el-input-number v-model="form.max_concurrency" :min="1" :step="1" placeholder="不限" style="width:100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="优先级" label-width="90px">
+                <el-input-number v-model="form.priority" :min="1" :step="10" style="width:100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-form-item label="适用任务">
+            <el-checkbox-group v-model="form.task_types">
+              <el-checkbox v-for="item in taskTypeOptions" :key="item.value" :label="item.value">{{ item.label }}</el-checkbox>
+            </el-checkbox-group>
+            <div class="muted" style="font-size:12px;margin-top:4px">不勾选表示通用；视觉模型可通过提高并发上限同时处理多条 OCR/图片任务。</div>
+          </el-form-item>
+          <el-row :gutter="12">
+            <el-col :span="8">
+              <el-form-item label="启用" label-width="90px">
+                <el-switch v-model="form.enabled" :active-value="1" :inactive-value="0" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="设为默认" label-width="90px">
+                <el-switch v-model="form.is_default" :active-value="1" :inactive-value="0" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-form-item label="备注">
+            <el-input v-model="form.note" placeholder="可选备注说明" />
+          </el-form-item>
+        </el-form>
+
+        <!-- 测试连接区域放在表单外部 -->
+        <div style="margin-top:8px;padding-top:12px;border-top:1px solid var(--line)">
+          <el-button @click.prevent="testConnection" :loading="testing" type="warning" plain>测试连接</el-button>
+          <div v-if="testResult" :style="{marginTop:'10px',padding:'10px 14px',borderRadius:'6px',
+                   backgroundColor: testResult.ok === true ? '#f0fdf4' : testResult.ok === false ? '#fef2f2' : '#eff6ff',
+                   color: testResult.ok === true ? '#15803d' : testResult.ok === false ? '#b42318' : '#1e40af', fontSize:'13px'}">
+            {{ testResult.message }}
+            <pre v-if="testResult.sample" style="margin:6px 0 0 0;font-size:12px;white-space:pre-wrap;background:rgba(0,0,0,.04);padding:6px;border-radius:4px">{{ testResult.sample }}</pre>
+          </div>
+        </div>
+
+        <template #footer>
+          <el-button @click="dialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="submitForm" :loading="saving">{{ isEdit ? "保存" : "创建" }}</el-button>
+        </template>
+      </el-dialog>
+    </section>
+  `
+};
+
+// ── 模型选择页面（卡片式选择） ──
+const ModelSelectionPage = {
+  components: { ErrorBox },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const profiles = ref([]);
+    const activeProfile = ref(null);
+    const activating = ref(null);
+
+    async function refresh() {
+      await load(async () => {
+        const [p, a] = await Promise.all([
+          apiRequest("/api/models/profiles"),
+          apiRequest("/api/models/active").catch(() => null)
+        ]);
+        profiles.value = p.filter(r => r.enabled);
+        activeProfile.value = a;
+      });
+    }
+
+    async function activateProfile(profileName) {
+      activating.value = profileName;
+      try {
+        await apiRequest(`/api/models/profiles/${encodeURIComponent(profileName)}/activate`, { method: "POST" });
+        ElMessage.success(`已切换为 "${profileName}"`);
+        refresh();
+      } catch (err) {
+        ElMessage.error(err.message || String(err));
+      } finally {
+        activating.value = null;
+      }
+    }
+
+    function providerTagType(provider) {
+      const map = { deepseek: "success", qwen: "", bailian: "warning", openai: "info" };
+      return map[provider] || "";
+    }
+
+    onMounted(refresh);
+    return { loading, error, profiles, activeProfile, activating, refresh, activateProfile, providerTagType };
+  },
+  template: `
+    <section>
+      <div class="page-title">
+        <div><h1>模型选择</h1><p>选择一个已启用的 AI 模型配置作为当前上下文使用的模型。</p></div>
+        <el-button @click="refresh" :loading="loading">刷新</el-button>
+      </div>
+      <ErrorBox :message="error" />
+
+      <!-- 当前激活模型 -->
+      <div v-if="activeProfile" style="margin-bottom:20px;padding:16px 20px;background:var(--primary-soft);
+                  border:1px solid var(--primary);border-radius:8px;display:flex;align-items:center;gap:16px">
+        <span style="font-weight:700;color:var(--primary)">当前使用</span>
+        <span style="font-size:15px;font-weight:600">{{ activeProfile.profile_name || "builtin" }}</span>
+        <el-tag size="small" :type="providerTagType(activeProfile.provider)">{{ activeProfile.provider }}</el-tag>
+        <code style="font-size:13px;color:var(--muted)">{{ activeProfile.model_name || "-" }}</code>
+        <span style="font-size:12px;color:var(--muted);margin-left:auto">来源: {{ activeProfile.source || "mysql" }}</span>
+      </div>
+
+      <div v-if="profiles.length === 0" v-loading="loading" style="text-align:center;padding:40px;color:var(--muted)">
+        暂无已启用的模型配置，请先在「模型配置」页面创建并启用 profile。
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:16px">
+        <div v-for="row in profiles" :key="row.profile_name"
+             style="background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:20px;
+                    box-shadow:var(--shadow);transition:box-shadow .2s"
+             @mouseenter="$event.currentTarget.style.boxShadow='0 4px 12px rgba(0,0,0,.1)'"
+             @mouseleave="$event.currentTarget.style.boxShadow='var(--shadow)'">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <span style="font-size:16px;font-weight:700">{{ row.profile_name }}</span>
+            <el-tag size="small" :type="providerTagType(row.provider)">{{ row.provider }}</el-tag>
+          </div>
+
+          <div style="margin-bottom:10px">
+            <div style="color:var(--muted);font-size:12px;margin-bottom:2px">文本模型</div>
+            <code style="font-size:13px;word-break:break-all">{{ row.model_name || "-" }}</code>
+          </div>
+
+          <div v-if="row.vision_model_name" style="margin-bottom:10px">
+            <div style="color:var(--muted);font-size:12px;margin-bottom:2px">视觉模型</div>
+            <code style="font-size:13px;word-break:break-all">{{ row.vision_model_name }}</code>
+          </div>
+
+          <div style="margin-bottom:10px">
+            <div style="color:var(--muted);font-size:12px;margin-bottom:2px">Base URL</div>
+            <div style="font-size:12px;color:var(--text);word-break:break-all">{{ row.base_url || "使用默认" }}</div>
+          </div>
+
+          <div v-if="row.note" style="margin-bottom:12px;font-size:12px;color:var(--muted);padding:6px 8px;background:var(--surface-soft);border-radius:4px">
+            备注: {{ row.note }}
+          </div>
+
+          <div style="margin-top:16px">
+            <el-button v-if="(activeProfile && activeProfile.profile_name === row.profile_name) || row.is_default"
+                       type="success" disabled style="width:100%">
+              已激活
+            </el-button>
+            <el-button v-else type="primary" style="width:100%"
+                       :loading="activating === row.profile_name"
+                       @click="activateProfile(row.profile_name)">
+              激活此模型
+            </el-button>
+          </div>
+        </div>
+      </div>
+    </section>
+  `
+};
+
+const PlatformsPage = {
+  components: { ErrorBox },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const rows = ref([]);
+    async function refresh() {
+      await load(async () => rows.value = await apiRequest("/api/platforms"));
+    }
+    onMounted(refresh);
+    return { loading, error, rows, refresh, platformName, formatTime, textOf };
+  },
+  template: `
+    <section>
+      <div class="page-title"><div><h1>平台管理</h1><p>按平台查看数据量、类型数、最近采集和近 7 日成功率。</p></div><el-button @click="refresh" :loading="loading">刷新</el-button></div>
+      <ErrorBox :message="error" />
+      <div class="panel">
+        <el-table :data="rows" v-loading="loading" empty-text="暂无平台数据">
+          <el-table-column label="平台" min-width="150"><template #default="{row}">{{ row.name || platformName(row.platform) }}</template></el-table-column>
+          <el-table-column prop="platform" label="平台代码" width="130" />
+          <el-table-column prop="total_items" label="数据量" width="100" />
+          <el-table-column prop="asset_type_count" label="资产类型" width="100" />
+          <el-table-column prop="recent_success_rate" label="近7日成功率" width="130"><template #default="{row}">{{ textOf(row.recent_success_rate) }}%</template></el-table-column>
+          <el-table-column prop="last_crawl_time" label="最近采集" min-width="170"><template #default="{row}">{{ formatTime(row.last_crawl_time) }}</template></el-table-column>
+          <el-table-column prop="last_discovered" label="最近发现" min-width="170"><template #default="{row}">{{ formatTime(row.last_discovered) }}</template></el-table-column>
+        </el-table>
+      </div>
+    </section>
+  `
+};
+
+const ReportsPage = {
+  components: { ErrorBox },
+  setup() {
+    const { loading, error, load } = usePageLoader();
+    const rows = ref([]);
+    const total = ref(0);
+    const detail = ref(null);
+    const filters = reactive({ page: 1, size: 20 });
+    async function refresh() {
+      await load(async () => {
+        const params = new URLSearchParams(filters);
+        const res = await apiRequest(`/api/reports?${params}`);
+        rows.value = res.items || [];
+        total.value = res.total || 0;
+      });
+    }
+    function onReportPageChange(pn) { filters.page = pn; refresh(); }
+    async function openDetail(row) {
+      detail.value = await apiRequest(`/api/reports/${row.report_id}`);
+    }
+    onMounted(refresh);
+    return { loading, error, rows, total, detail, filters, refresh, openDetail, formatTime, textOf, onReportPageChange };
+  },
+  template: `
+    <section>
+      <div class="page-title"><div><h1>质量报告</h1><p>查看每次采集后的字段覆盖率、缺失和异常样本。</p></div><el-button @click="refresh" :loading="loading">刷新</el-button></div>
+      <ErrorBox :message="error" />
+      <div class="panel">
+        <el-table :data="rows" v-loading="loading" empty-text="暂无质量报告">
+          <el-table-column prop="report_id" label="ID" width="80" />
+          <el-table-column prop="batch_id" label="批次" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="source_platform" label="平台" width="120" />
+          <el-table-column prop="quality_score" label="质量分" width="100" />
+          <el-table-column prop="item_count" label="标的数" width="100" />
+          <el-table-column prop="missing_fields_count" label="缺失字段" width="110" />
+          <el-table-column prop="created_at" label="生成时间" width="170"><template #default="{row}">{{ formatTime(row.created_at) }}</template></el-table-column>
+          <el-table-column label="操作" width="100" fixed="right"><template #default="{row}"><el-button size="small" @click="openDetail(row)">查看</el-button></template></el-table-column>
+        </el-table>
+        <div class="panel-body"><el-pagination layout="prev, pager, next, total" :total="total" :page-size="filters.size" v-model:current-page="filters.page" @current-change="onReportPageChange" /></div>
+      </div>
+      <el-dialog :model-value="!!detail" title="报告详情" width="860px" @close="detail=null" @closed="detail=null">
+        <pre class="pre">{{ JSON.stringify(detail || {}, null, 2) }}</pre>
+      </el-dialog>
+    </section>
+  `
+};
+
+const routes = [
+  { path: "/", redirect: "/dashboard" },
+  { path: "/dashboard", component: DashboardPage },
+  { path: "/jobs", component: JobsPage },
+  { path: "/batches", component: BatchesPage },
+  { path: "/items", component: ItemsPage },
+  { path: "/items/:id", component: ItemDetailPage },
+  { path: "/queues", component: QueuesPage },
+  { path: "/crawl-queue", component: CrawlQueuePage },
+  { path: "/platforms", component: PlatformsPage },
+  { path: "/reports", component: ReportsPage },
+  { path: "/models/config", component: ModelConfigPage },
+  { path: "/models/select", component: ModelSelectionPage }
+];
+
+const router = createRouter({
+  history: createWebHashHistory(),
+  routes
+});
+
+const App = {
+  setup() {
+    const scheduler = ref({});
+    const runningTasks = ref(0);
+    let timer = null;
+    async function refreshHeader() {
+      try {
+        const [sch, tasks] = await Promise.all([apiRequest("/api/scheduler/status"), apiRequest("/api/tasks?include_finished=false")]);
+        scheduler.value = sch || {};
+        runningTasks.value = (tasks.items || []).length;
+      } catch (err) {
+        scheduler.value = { running: false };
+      }
+    }
+    onMounted(() => {
+      refreshHeader();
+      timer = setInterval(refreshHeader, 15000);
+    });
+    onUnmounted(() => timer && clearInterval(timer));
+    return { scheduler, runningTasks };
+  },
+  template: `
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">拍卖数据采集管理平台</div>
+        <div class="top-actions">
+          <span class="top-pill"><span class="status-dot" :class="{ok: scheduler.running, bad: scheduler.running === false}"></span>调度器 {{ scheduler.running ? "运行中" : "未运行" }}</span>
+          <span class="top-pill">后台任务 {{ runningTasks }}</span>
+          <span class="top-pill">MySQL auction_data</span>
+        </div>
+      </header>
+      <div class="layout">
+        <nav class="sidebar">
+          <router-link class="nav-item" to="/dashboard">运营总览</router-link>
+          <router-link class="nav-item" to="/jobs">任务管理</router-link>
+          <router-link class="nav-item" to="/batches">批次管理</router-link>
+          <router-link class="nav-item" to="/items">标的查看</router-link>
+          <router-link class="nav-item" to="/queues">队列管理</router-link>
+          <router-link class="nav-item" to="/crawl-queue">采集队列</router-link>
+          <router-link class="nav-item" to="/platforms">平台管理</router-link>
+          <router-link class="nav-item" to="/reports">质量报告</router-link>
+          <div style="padding:12px 12px 4px;color:var(--muted);font-size:12px;letter-spacing:1px">模型管理</div>
+          <router-link class="nav-item" to="/models/config">模型配置</router-link>
+          <router-link class="nav-item" to="/models/select">模型选择</router-link>
+        </nav>
+        <main class="content">
+          <router-view></router-view>
+        </main>
+      </div>
+    </div>
+  `
+};
+
+const app = createApp(App);
+app.use(ElementPlus);
+app.use(router);
+app.config.globalProperties.PLATFORM_LABELS = PLATFORM_LABELS;
+app.config.globalProperties.STATUS_TYPE = STATUS_TYPE;
+app.config.globalProperties.router = router;
+app.mount("#app");
+</script>
+</body>
+</html>

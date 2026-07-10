@@ -1,27 +1,29 @@
-from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Mapping, MutableMapping, Union
 
 
 DEFAULT_PROVIDER_BASE_URLS = {
     "openai": "https://api.openai.com",
     "deepseek": "https://api.deepseek.com",
     "qwen": "https://dashscope.aliyuncs.com",
+    "bailian": "https://dashscope.aliyuncs.com",   # 百炼 = 千问的 OpenAI 兼容模式
 }
 
 DEFAULT_PROVIDER_MODELS = {
     "openai": "gpt-4o-mini",
-    "deepseek": "deepseek-chat",
+    "deepseek": "deepseek-v4-flash",
     "qwen": "qwen-plus",
+    "bailian": "deepseek-v4-flash",     # 百炼默认使用 deepseek 模型
 }
 
 DEFAULT_PROVIDER_VISION_MODELS = {
     "openai": "gpt-4o-mini",
-    "deepseek": "",
+    "deepseek": "deepseek-v4-flash",
     "qwen": "qwen-vl-plus",
+    "bailian": "deepseek-v4-flash",     # 百炼视觉模型
 }
 
 
@@ -105,7 +107,7 @@ def project_dotenv_candidates() -> list[Path]:
 
 
 def load_dotenv_file(
-    path: str | Path,
+    path: Union[str, Path],
     *,
     env: MutableMapping[str, str] | None = None,
     override: bool = False,
@@ -149,7 +151,7 @@ def load_default_dotenv(*, env: MutableMapping[str, str] | None = None) -> None:
 
 def _prepared_env(
     env: Mapping[str, str] | MutableMapping[str, str] | None,
-    dotenv_path: str | Path | None,
+    dotenv_path: Union[str, Path, None],
 ) -> Mapping[str, str]:
     if env is None:
         load_default_dotenv()
@@ -184,7 +186,7 @@ def _enabled_mysql_profile(mysql_profile: Mapping[str, Any] | None) -> Mapping[s
 def resolve_ai_config(
     *,
     env: Mapping[str, str] | MutableMapping[str, str] | None = None,
-    dotenv_path: str | Path | None = None,
+    dotenv_path: Union[str, Path, None] = None,
     mysql_profile: Mapping[str, Any] | None = None,
     cli: Mapping[str, Any] | None = None,
 ) -> ResolvedAIConfig:

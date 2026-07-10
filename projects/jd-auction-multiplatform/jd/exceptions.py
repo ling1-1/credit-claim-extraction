@@ -2,7 +2,9 @@
 自定义异常体系
 统一管理各类异常，便于上层统一处理
 """
-from __future__ import annotations
+
+
+from typing import Optional
 
 
 class JDScraperError(Exception):
@@ -17,9 +19,9 @@ class JDAPIError(JDScraperError):
         self,
         function_id: str,
         message: str = "API 调用失败",
-        status_code: int | None = None,
-        response_body: str | None = None,
-        original_error: Exception | None = None,
+        status_code: Optional[int] = None,
+        response_body: Optional[str] = None,
+        original_error: Optional[Exception] = None,
     ) -> None:
         self.function_id = function_id
         self.status_code = status_code
@@ -34,9 +36,9 @@ class CrawlError(JDScraperError):
     def __init__(
         self,
         message: str,
-        paimai_id: str | None = None,
-        category_id: str | None = None,
-        original_error: Exception | None = None,
+        paimai_id: Optional[str] = None,
+        category_id: Optional[str] = None,
+        original_error: Optional[Exception] = None,
     ) -> None:
         self.paimai_id = paimai_id
         self.category_id = category_id
@@ -51,9 +53,9 @@ class ExtractionError(JDScraperError):
         self,
         field_key: str,
         message: str = "字段提取失败",
-        paimai_id: str | None = None,
-        source_type: str | None = None,
-        original_error: Exception | None = None,
+        paimai_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        original_error: Optional[Exception] = None,
     ) -> None:
         self.field_key = field_key
         self.paimai_id = paimai_id
@@ -69,9 +71,9 @@ class DatabaseError(JDScraperError):
         self,
         operation: str,
         message: str = "数据库操作失败",
-        table_name: str | None = None,
-        paimai_id: str | None = None,
-        original_error: Exception | None = None,
+        table_name: Optional[str] = None,
+        paimai_id: Optional[str] = None,
+        original_error: Optional[Exception] = None,
     ) -> None:
         self.operation = operation
         self.table_name = table_name

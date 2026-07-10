@@ -1,11 +1,18 @@
+import json
 import unittest
 
 from platform_adapters.ali_adapter import (
     AliAuctionAdapter,
     AliBrowserProfileFetcher,
+    AliListChannel,
     AliListItem,
+    AliMtopAuctionFetcher,
     AliTopApiFetcher,
+    ALI_REAL_ESTATE_CHANNEL,
     _classify_asset_group,
+    _ali_assessment_price_display,
+    _ali_attachments,
+    _extract_special_notice_from_text,
     _parse_ali_mtop_detail,
 )
 
@@ -134,6 +141,104 @@ class AliAdapterTests(unittest.TestCase):
         self.assertNotIn("app_secret", params)
         self.assertNotIn("cookie", params)
 
+    def test_mtop_list_uses_channel_items_context(self):
+        fetcher = AliMtopAuctionFetcher()
+        captured = {}
+
+        def fake_call(api, version, data):
+            captured["api"] = api
+            captured["version"] = version
+            captured["data"] = data
+            return {
+                "ret": ["SUCCESS::调用成功"],
+                "data": {
+                    "data": {
+                        "GQL_getPageModulesData": {
+                            "9018433170": {
+                                "items": {
+                                    "pageSize": 60,
+                                    "totalCount": 17609678,
+                                    "hasNextPage": True,
+                                    "schemeList": [
+                                        {
+                                            "itemId": "1060875479188",
+                                            "auctionTitle": "济南市历下区金茂府底层商铺",
+                                            "displayInitialPrice": "188,800.00",
+                                            "displayInitialPriceUnit": "元",
+                                            "price": "188,800.00",
+                                            "priceUnit": "元",
+                                            "auctionLink": "https://zc-paimai.taobao.com/auction.htm?itemId=1060875479188",
+                                            "location": "山东省济南市历下区",
+                                        }
+                                    ],
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+
+        fetcher._call_mtop = fake_call
+
+        items = fetcher.fetch_list(limit=1, channels=[ALI_REAL_ESTATE_CHANNEL], pages_per_channel=1)
+
+        variables = json.loads(captured["data"]["dfVariables"])
+        item_context = json.loads(variables["context"]["_b_9018433170:items"])
+        self.assertEqual(captured["api"], "mtop.taobao.datafront.invoke.auctionwalle")
+        self.assertEqual(variables["pageId"], 1410667)
+        self.assertEqual(variables["moduleIds"], "9018433170:items~keywordSource")
+        self.assertEqual(item_context["page"], "1")
+        self.assertEqual(variables["context"]["sceneCode"], "20200713C5R32B6N")
+        self.assertEqual(items[0].item_id, "1060875479188")
+        self.assertEqual(items[0].asset_group, "real_estate")
+        self.assertEqual(items[0].category, "房地产")
+        self.assertEqual(items[0].raw["_ali_channel"]["totalCount"], 17609678)
+
+    def test_mtop_list_supports_additional_channel_definitions(self):
+        fetcher = AliMtopAuctionFetcher()
+        channel = AliListChannel(
+            key="custom_debt",
+            label="债权",
+            asset_group="debt",
+            page_id=1410667,
+            scene_code="scene-x",
+            spm="spm-x",
+        )
+
+        def fake_call(api, version, data):
+            return {
+                "ret": ["SUCCESS::调用成功"],
+                "data": {
+                    "data": {
+                        "GQL_getPageModulesData": {
+                            "9018433170": {
+                                "items": {
+                                    "pageSize": 60,
+                                    "totalCount": 1,
+                                    "hasNextPage": False,
+                                    "schemeList": [
+                                        {
+                                            "itemId": "20001",
+                                            "auctionTitle": "某公司债权资产包",
+                                            "price": "100",
+                                            "priceUnit": "万元",
+                                        }
+                                    ],
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+
+        fetcher._call_mtop = fake_call
+
+        items = fetcher.fetch_list(limit=1, channels=[channel], pages_per_channel=1)
+
+        self.assertEqual(items[0].asset_group, "debt")
+        self.assertEqual(items[0].category, "债权")
+        self.assertEqual(items[0].final_price_raw, "100万元")
+
     def test_mtop_detail_uses_consult_price_as_assessment_price(self):
         list_item = AliListItem(
             item_id="1060875479188",
@@ -165,6 +270,60 @@ class AliAdapterTests(unittest.TestCase):
         self.assertIn("评估价", bundle.assessment_price_time)
         self.assertIn("1,746,163", bundle.assessment_price_time)
 
+    def test_ali_assessment_ignores_zero_price(self):
+        display = _ali_assessment_price_display(
+            {"marketPrice": 0, "consultPrice": 0, "assessmentPrice": 0},
+            {},
+            {},
+        )
+
+        self.assertIsNone(display)
+
+    def test_mtop_detail_prefers_complete_location_from_description(self):
+        list_item = AliListItem(
+            item_id="1053599188591",
+            title="济南市市中区建设路87号14号楼2--109储藏室",
+            category="商业用房",
+            asset_group="real_estate",
+            asset_location="山东省济南市市中区",
+        )
+        bundle = _parse_ali_mtop_detail(
+            {
+                "itemId": "1053599188591",
+                "title": "济南市市中区建设路87号14号楼2--109储藏室",
+                "itemBizType": "商业用房",
+                "auctionAddress": "建设路87号",
+                "location": "山东省 济南市 市中区",
+                "startPrice": 5746855,
+                "currentPriceLong": 5746855,
+            },
+            source_url="https://zc-paimai.taobao.com/auction.htm?itemId=1053599188591",
+            list_item=list_item,
+            detail_json={},
+            description_json={
+                "data": {
+                    "content": "<p>济南市市中区建设路 87 号 14 号楼 2--109 储藏室 [证号：济南20250234433] 面积：18.35平方米</p>"
+                }
+            },
+            attachments_json={},
+            summary_json={},
+            notice_json={},
+        )
+
+        self.assertEqual(bundle.asset_location, "济南市市中区建设路87号14号楼2--109储藏室")
+
+    def test_ali_special_notice_extracts_notice_matters_heading(self):
+        text = (
+            "五、咨询、展示看样的时间与方式。"
+            "网上交保参与竞价注意事项：竞买人需仔细阅读公告，交纳保证金后参与竞价。"
+            "后续普通条款。"
+        )
+
+        notice = _extract_special_notice_from_text(text)
+
+        self.assertIn("网上交保参与竞价注意事项", notice)
+        self.assertIn("交纳保证金", notice)
+
     def test_browser_rendered_detail_extracts_assessment_and_standard_asset_type(self):
         bundle = self.adapter.parse_rendered_detail(
             """
@@ -194,6 +353,108 @@ class AliAdapterTests(unittest.TestCase):
                 "济南市历下区金茂府宸园21号楼107商铺 该页面其他区块提到债权投资",
             ),
             "real_estate",
+        )
+
+    def test_classify_ali_prop_titles_with_real_estate_and_vehicle_terms(self):
+        self.assertEqual(
+            _classify_asset_group("prop", "济南市槐荫区中骏尚城612号房 近邻地铁1/4号线"),
+            "real_estate",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "济南槐荫区济微路30号2609.37㎡五层独栋写字楼"),
+            "real_estate",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "24年上牌 本田NSS 350 摩托车 手续齐全 正常过户"),
+            "vehicle",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "（特价房）济南市天桥区 金科·澜山公馆· 中楼层 含家具家电"),
+            "real_estate",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "农用自卸三轮车 配置见描述"),
+            "vehicle",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "（特价捡漏）济阳区济南浙江五金建材城，仅需28000，超低门槛刚需投资两不误"),
+            "real_estate",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", '停泊于青岛某水域的50米可载98人游艇级客船"虎鲨号"一艘'),
+            "vehicle",
+        )
+
+    def test_ali_attachments_walks_nested_file_nodes(self):
+        payload = {
+            "data": {
+                "materials": {
+                    "fileList": [
+                        {
+                            "fileName": "竞买公告.pdf",
+                            "downloadURL": "//example.test/notice.pdf",
+                            "fileId": "F-1",
+                        }
+                    ]
+                }
+            }
+        }
+
+        attachments = _ali_attachments(payload)
+
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]["name"], "竞买公告.pdf")
+        self.assertEqual(attachments[0]["url"], "https://example.test/notice.pdf")
+        self.assertEqual(attachments[0]["id"], "F-1")
+
+    def test_classify_ali_prop_titles_prefers_specific_asset_groups(self):
+        self.assertEqual(
+            _classify_asset_group("prop", "山东立晨集团有限公司等25户债权资产包"),
+            "debt",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "潮州农村商业银行股份有限公司0.8%股权"),
+            "equity",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "某项目在建工程及土地使用权"),
+            "land",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "山东省济南市长清第28加油站5年经营权出租"),
+            "usufruct",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "黄铜带边角料等废料一批"),
+            "goods",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "潍坊老炒匠食品有限公司5户11笔不良债权"),
+            "debt",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "268卡特330GC液压挖掘机CAT00330HFEK00166有铲斗"),
+            "equipment",
+        )
+        self.assertEqual(
+            _classify_asset_group("车辆", "268卡特330GC液压挖掘机CAT00330HFEK00166有铲斗【GCJX】"),
+            "equipment",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "268卡特330GC液压挖掘机CAT00330HFEK00166有铲斗【GCJX】 公告模板提到土地增值税和车辆过户"),
+            "equipment",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "贵州花海拾味餐饮文化有限公司名下宝骏730一辆"),
+            "vehicle",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "1辆别克GL8（车牌号苏BV9G69）"),
+            "vehicle",
+        )
+        self.assertEqual(
+            _classify_asset_group("prop", "中国石化销售股份有限公司山东济宁石油分公司土地使用权及地面资产"),
+            "land",
         )
 
 

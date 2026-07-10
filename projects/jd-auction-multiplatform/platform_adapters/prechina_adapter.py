@@ -1,9 +1,9 @@
-"""贵州阳光产权交易所 适配器
+﻿"""贵州阳光产权交易所 适配器
 
 数据来源：首页 HTML 表格（MetInfo CMS）
 - 首页包含多个表格，每个表格代表一个业务类别
 - 表格字段：项目编号、项目名称、挂牌价格(万元)、公告日期、截止日期
-- 项目编号格式：GP-{D|B|C}-{CQ|ZL|ZZ|ZC|QT}-{年份}{序号}({序号})
+- 项目编号格式：GP-{(?:D|B)|C}-{(?:CQ|ZL)|(?:ZZ|ZC)|QT}-{年份}{序号}({序号})
 
 业务类别：
 - CQ = 股权转让
@@ -13,7 +13,6 @@
 - QT = 其他项目
 """
 
-from __future__ import annotations
 
 import json
 import re
@@ -25,7 +24,16 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-from jd.ai_extractor import AIExtractionContext
+from jd.ai_extractor import AIExtractionContext, AI_DETAIL_TEXT_LIMIT
+
+# 复用 CQUAE 的 HTML 解析器提取详情页表格键值对
+from platform_adapters.cquae_adapter import (
+    _parse_lite_html,
+    _cell_texts,
+    looks_like_label,
+    add_key_value,
+    compact_text as cquae_compact_text,
+)
 
 
 # ===== 常量 =====
@@ -120,7 +128,7 @@ def parse_project_code(project_code: str) -> Dict[str, Optional[str]]:
         return result
     
     # 特殊格式: SWZC + 数字 + 字母后缀 (外部联合挂牌)
-    m2 = re.match(r"^(SWZC|QY)(\d+)([A-Z]*)$", code)
+    m2 = re.match(r"^((?:SWZC|QY))(\d+)([A-Z]*)$", code)
     if m2:
         result["prefix"] = m2.group(1)
         result["status"] = "D"  # 默认正式
@@ -476,38 +484,63 @@ class PrechinaAdapter:
         list_item: Optional[PrechinaListItem] = None,
     ) -> PrechinaDetailBundle:
         """解析详情页 HTML，提取结构化数据"""
-        # 详情页面通常包含更完整的项目信息
-        # 这里做基本解析，后续可扩展
-        
-        # 清理HTML标签获取纯文本
-        text = re.sub(r"(?is)<script.*?</script>|<style.*?</style>", " ", html or "")
-        text = re.sub(r"(?s)<[^>]+>", " ", text)
-        text = compact_text(text)
-        
-        # 尝试提取键值对（从详情页的表格或列表中）
-        key_values: Dict[str, str] = dict(list_item.raw_fields) if list_item else {}
-        
-        # 补充基本信息
+
+        # 用 CQUAE 解析器提取详情页表格键值对
+        key_values: Dict[str, str] = {}
+        attachments: List[Dict[str, Any]] = []
+        image_urls: List[str] = []
+
+        if html:
+            parser = _parse_lite_html(html)
+            for row in parser.rows:
+                cells = _cell_texts(row)
+                if len(cells) < 2:
+                    continue
+                if len(cells) == 2 and looks_like_label(cells[0]):
+                    add_key_value(key_values, cells[0], cells[1])
+                elif len(cells) == 3 and looks_like_label(cells[1]):
+                    add_key_value(key_values, cells[1], cells[2])
+                elif len(cells) % 2 == 0:
+                    for key, value in zip(cells[0::2], cells[1::2]):
+                        if looks_like_label(key):
+                            add_key_value(key_values, key, value)
+
+            # 附件提取（从详情页表格中的文件链接）
+            attachments = self._extract_attachments(html, url)
+
+            # 图片提取 + 过滤站点 UI 图片
+            _UI_IMAGE_PATTERNS = re.compile(
+                r"/(?:upload/(?:(?:image|2021)|202512)|skin/images/btn/|(?:Ueditor|kindeditor)|(?:layer|theme))/"
+                r"|(?:dangjian|erweima)|logo\.(?:png|checked)\.(?:gif|unchecked)\.gif"
+                r"|xyt\.xinchacha\.com",
+                re.I,
+            )
+            all_images = self._extract_images(html)
+            image_urls = [
+                img for img in all_images
+                if not _UI_IMAGE_PATTERNS.search(img)
+            ]
+
+        # 补充列表数据（仅当详情页未提取到时）
         if list_item:
             if list_item.project_code_raw and "项目编号" not in key_values:
                 key_values["项目编号"] = list_item.project_code_raw
             if list_item.title and "项目名称" not in key_values:
                 key_values["项目名称"] = list_item.title
-            if list_item.price_raw:
+            if list_item.price_raw and "挂牌价格" not in key_values:
                 key_values["挂牌价格"] = list_item.price_raw
-            if list_item.announce_date:
+            if list_item.announce_date and "公告日期" not in key_values:
                 key_values["公告日期"] = list_item.announce_date
-            if list_item.end_date:
+            if list_item.end_date and "截止日期" not in key_values:
                 key_values["截止日期"] = list_item.end_date
-            if list_item.biz_type_name:
+            if list_item.biz_type_name and "业务类型" not in key_values:
                 key_values["业务类型"] = list_item.biz_type_name
-        
-        # 提取附件链接
-        attachments = self._extract_attachments(html, url)
-        
-        # 提取图片
-        image_urls = self._extract_images(html)
-        
+
+        # 清理HTML标签获取纯文本
+        text = re.sub(r"(?is)<script.*?</script>|<style.*?</style>", " ", html or "")
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = compact_text(text)
+
         return PrechinaDetailBundle(
             source_item_id=list_item.source_item_id if list_item else "",
             source_url=url,
@@ -618,8 +651,22 @@ class PrechinaAdapter:
         title = first_non_blank(kv.get("项目名称"), kv.get("标的名称"), bundle.title)
         status = first_non_blank(li.status_name if li else None, kv.get("项目状态"))
         price = first_non_blank(kv.get("挂牌价格"), kv.get("转让底价"), li.price_raw if li else None)
-        contact = join_non_blank(kv.get("联系人"), kv.get("联系电话"))
-        notice = first_non_blank(kv.get("特别告知"), kv.get("重大事项"))
+        contact = join_non_blank(
+            kv.get("联系人"), kv.get("交易机构联系人"), kv.get("联系电话"), kv.get("交易机构联系电话"),
+        )
+        notice = first_non_blank(kv.get("特别告知"), kv.get("重大事项"), kv.get("风险提示"))
+        location = first_non_blank(
+            kv.get("标的所在地"), kv.get("注册地（住所）"), kv.get("注册地"), kv.get("坐落"),
+        )
+        disposal_party = first_non_blank(
+            kv.get("转让方名称"), kv.get("转让方"), kv.get("委托方"),
+        )
+        assessment = first_non_blank(
+            kv.get("转让标的对应评估值(万元)"), kv.get("评估值"),
+            kv.get("评估价格"),
+        )
+        if assessment:
+            assessment = f"评估价 {assessment} 万元"
 
         asset_group = infer_asset_group(bundle.source_item_id, bundle.title)
         asset_type = infer_asset_type(bundle.source_item_id, bundle.title)
@@ -631,7 +678,11 @@ class PrechinaAdapter:
         set_field("asset_type", asset_type or "其他", "computed", "infer_asset_type", asset_type, "inference", 0.85)
         set_field("project_name", title, "detail_html", "title", title, "html_rule", 0.95)
         set_field("project_status", status, "list_html", "status", status)
+        set_field("asset_location", location, "detail_html", "location", location)
+        set_field("disposal_party", disposal_party, "detail_html", "disposal_party", disposal_party)
+        set_field("assessment_price_time", assessment, "detail_html", "assessment", assessment)
         set_field("final_price_raw", price, "list_html", "price", price)
+        set_field("start_price_raw", price, "list_html", "price", price)
         set_field("contact_info", contact, "detail_html", "contact", contact)
         set_field("special_notice", notice, "detail_html", "notice", notice)
         set_field("signup_start_time", li.announce_date if li else None, "list_html", "announce_date", li.announce_date if li else None)
@@ -673,7 +724,7 @@ class PrechinaAdapter:
             })
         else:
             values.update({
-                "raw_detail_text": (bundle.detail_text or "")[:12000],
+                "raw_detail_text": (bundle.detail_text or "")[:AI_DETAIL_TEXT_LIMIT],
                 "raw_table_pairs_json": json.dumps(kv, ensure_ascii=False, sort_keys=True),
                 "site_images": images,
             })

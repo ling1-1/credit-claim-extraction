@@ -1,14 +1,10 @@
-import json
-import sqlite3
-import tempfile
 import unittest
-from pathlib import Path
 
+import jd_scraper
 from jd_scraper import (
     COMMON_FIELDS,
     SPECIAL_FIELDS,
     JDCategory,
-    JDScraperDatabase,
     classify_category,
     extract_common_values,
     extract_key_values_from_html,
@@ -77,6 +73,7 @@ class SchemaAndExtractionTests(unittest.TestCase):
             },
             parsed=parsed,
             notice_parsed=parsed,
+            paimai_id="test-id",
         )
 
         self.assertEqual(values["asset_location"], "上海市徐汇区龙华街道160街坊")
@@ -119,13 +116,21 @@ class SchemaAndExtractionTests(unittest.TestCase):
         """
         parsed = extract_key_values_from_html(html)
 
-        values, _, details = extract_special_values(asset_group="debt", parsed=parsed, notice_parsed=parsed, core={})
+        values, _, details = extract_special_values(
+            asset_group="debt",
+            parsed=parsed,
+            notice_parsed=parsed,
+            core={},
+            paimai_id="test-id",
+        )
 
         self.assertEqual(values["household_count"], "2")
         self.assertEqual(len(details), 2)
         self.assertIn("上海测试公司", values["debtor_name"])
-        self.assertIn("400.00", values["principal_balance"])
-        self.assertIn("60.00", values["interest_balance"])
+        self.assertEqual(details[0]["principal_balance"], "100.00")
+        self.assertEqual(details[1]["principal_balance"], "300.00")
+        self.assertEqual(details[0]["interest_balance"], "20.00")
+        self.assertEqual(details[1]["interest_balance"], "40.00")
         self.assertEqual(values["benchmark_date"], "2025年6月20日")
         self.assertIn("特别提示", values["disclosed_defects"])
 
@@ -134,64 +139,8 @@ class SchemaAndExtractionTests(unittest.TestCase):
         self.assertEqual(classify_category(JDCategory("112", "土地")), "land")
         self.assertEqual(classify_category(JDCategory("123", "其他财产")), "other")
 
-    def test_database_creates_all_field_extraction_rows_even_when_values_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "sample.sqlite"
-            db = JDScraperDatabase(db_path)
-            db.init_schema()
-            db.seed_field_catalog()
-
-            db.upsert_raw_payloads(
-                paimai_id="1001",
-                batch_id="batch-1",
-                source_url="https://paimai.jd.com/1001",
-                list_json={"id": 1001},
-                detail_json={},
-                realtime_json={},
-                description_html="<p>主债务人名称：测试债务人</p>",
-                attachments_json=[],
-            )
-            db.upsert_common_item(
-                paimai_id="1001",
-                batch_id="batch-1",
-                asset_group="debt",
-                jd_category_id="109",
-                jd_category_name="债权",
-                values={"project_name": "测试项目"},
-                field_results={"project_name": {"value": "测试项目", "status": "extracted"}},
-            )
-            db.upsert_special_item(
-                paimai_id="1001",
-                asset_group="debt",
-                values={"debtor_name": "测试债务人"},
-                field_results={"debtor_name": {"value": "测试债务人", "status": "extracted"}},
-            )
-
-            conn = sqlite3.connect(db_path)
-            try:
-                common_count = conn.execute(
-                    "SELECT COUNT(*) FROM field_extractions WHERE paimai_id='1001' AND field_namespace='common'"
-                ).fetchone()[0]
-                debt_count = conn.execute(
-                    "SELECT COUNT(*) FROM field_extractions WHERE paimai_id='1001' AND field_namespace='special.debt'"
-                ).fetchone()[0]
-                missing_principal = conn.execute(
-                    """
-                    SELECT status FROM field_extractions
-                    WHERE paimai_id='1001'
-                      AND field_namespace='special.debt'
-                      AND field_key='principal_balance'
-                    """
-                ).fetchone()[0]
-                row = conn.execute("SELECT special_fields_json FROM asset_debt WHERE paimai_id='1001'").fetchone()[0]
-            finally:
-                conn.close()
-
-            self.assertEqual(common_count, len(COMMON_FIELDS))
-            self.assertEqual(debt_count, len(SPECIAL_FIELDS["debt"]))
-            self.assertEqual(missing_principal, "missing_on_page")
-            self.assertIn("principal_balance", json.loads(row))
-
+    def test_legacy_sqlite_database_class_is_not_exposed(self):
+        self.assertFalse(hasattr(jd_scraper, "JDScraperDatabase"))
 
 if __name__ == "__main__":
     unittest.main()

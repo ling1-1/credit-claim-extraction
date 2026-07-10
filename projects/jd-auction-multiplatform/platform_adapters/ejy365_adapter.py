@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+﻿
 import json
 import re
 from dataclasses import dataclass, field
@@ -8,13 +7,16 @@ from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
+import requests
+
 from jd.ai_extractor import AIExtractionContext
 
 
 DEFAULT_BASE_URL = "https://www.ejy365.com"
+JMJL_API_URL = f"{DEFAULT_BASE_URL}/jmjl_detail"
 DETAIL_BASE_URL = f"{DEFAULT_BASE_URL}/info/"
 PROJECT_NO_RE = re.compile(r"\b[A-Z]\d{3,6}[A-Z]{1,4}\d{4,}\b")
-FILE_LINK_RE = re.compile(r"\.(?:pdf|docx?|xlsx?|zip|rar)(?:$|[?#])", re.IGNORECASE)
+FILE_LINK_RE = re.compile(r"\.(?:(?:pdf|docx)?|xlsx?|(?:zip|rar))(?:$|[?#])", re.IGNORECASE)
 LIST_LABEL_STOP_TOKENS = (
     "项目编号",
     "地区",
@@ -47,6 +49,29 @@ EJY365_PROJECT_TYPE_LABELS: Dict[str, Tuple[str, str]] = {
     "KQ": ("usufruct", "矿权"),
     "LQ": ("usufruct", "林权"),
     "HKQ": ("usufruct", "海域使用权"),
+    "GGJYQ": ("usufruct", "广告经营权"),
+    "ZJGC": ("other", "在建工程"),
+    "MTQCNZB": ("other", "煤炭去产能指标"),
+    "PFQJY": ("usufruct", "排放权交易"),
+    "STZY": ("usufruct", "生态资源"),
+    "KCPZR": ("goods", "矿产品转让"),
+    "QYTPH": ("other", "区域碳普惠"),
+    "SJCPL": ("other", "数据产品类"),
+    "SLL": ("other", "算力类"),
+    "SB": ("equipment", "设备"),
+    "CZ": ("vehicle", "船舶"),
+    "GYYSQ": ("usufruct", "国有土地使用权"),
+    "TDFWQ": ("usufruct", "土地服务权"),
+    "QTKQ": ("usufruct", "其他矿权"),
+    "TZQ": ("usufruct", "投资权"),
+    "JYQ": ("usufruct", "经营权"),
+    "CSSYQ": ("usufruct", "场所使用权"),
+    "ZRZY": ("usufruct", "自然资源"),
+    "PWS": ("usufruct", "排污权"),
+    "PWFQ": ("usufruct", "排放权"),
+    "HJSYQ": ("usufruct", "环境使用权"),
+    "JN": ("other", "节能"),
+    "SJ": ("other", "数据资产"),
     "QT": ("other", "其他"),
 }
 
@@ -138,6 +163,8 @@ class Ejy365DetailBundle:
     title: Optional[str] = None
     source_item_id: Optional[str] = None
     raw_payloads: Dict[str, Any] = field(default_factory=dict)
+    bid_records_json: Optional[List[Dict[str, Any]]] = None
+    jmjl_detail: Optional[Dict[str, Any]] = None
 
 
 class _ParsedHTML:
@@ -185,6 +212,10 @@ class _SimpleHTMLParser(HTMLParser):
         self._current_link: Optional[Dict[str, Any]] = None
         self._current_row: Optional[List[str]] = None
         self._current_cell: Optional[List[str]] = None
+        # dl/dt/dd pair tracking (e交易 uses <dl><dt>key</dt><dd>value</dd></dl>)
+        self._last_dt_text: Optional[str] = None
+        self._current_dd: Optional[List[str]] = None
+        self._dl_depth: int = 0  # nested dl counter, pairs dt/dd only within same dl
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
         attrs_dict = {key.lower(): value or "" for key, value in attrs}
@@ -200,6 +231,15 @@ class _SimpleHTMLParser(HTMLParser):
             self._current_row = []
         elif tag in {"td", "th"}:
             self._current_cell = []
+        elif tag == "dl":
+            self._dl_depth += 1
+        elif tag == "dt":
+            # <dt>key</dt> — text will be collected via handle_data
+            pass
+        elif tag == "dd":
+            # <dd>value</dd> — only pair if inside a <dl>
+            if self._dl_depth > 0:
+                self._current_dd = []
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
@@ -223,6 +263,26 @@ class _SimpleHTMLParser(HTMLParser):
             if href or text:
                 self.links.append({"href": href, "text": text})
             self._current_link = None
+        elif tag == "dt":
+            # After collecting dt text from handle_data, scan text_parts backwards
+            # to find the last dt line (ends with : or ：)
+            for part in reversed(self.text_parts):
+                stripped = compact_text(part)
+                if stripped.rstrip(":：") and (stripped.endswith("：") or stripped.endswith(":")):
+                    self._last_dt_text = stripped.rstrip(":：")
+                    break
+                if stripped:
+                    break
+        elif tag == "dl":
+            self._dl_depth = max(0, self._dl_depth - 1)
+            if self._dl_depth == 0:
+                self._last_dt_text = None  # reset on dl exit to avoid cross-block pairing
+        elif tag == "dd" and self._current_dd is not None:
+            dd_text = compact_text("".join(self._current_dd))
+            self._current_dd = None
+            if dd_text and self._last_dt_text and _looks_like_key(self._last_dt_text) and self._dl_depth > 0:
+                self.rows.append([self._last_dt_text, dd_text])
+                self._last_dt_text = None  # consumed
         if tag in self.BLOCK_TAGS:
             self.text_parts.append("\n")
 
@@ -234,6 +294,8 @@ class _SimpleHTMLParser(HTMLParser):
             self._current_link["text_parts"].append(data)
         if self._current_cell is not None:
             self._current_cell.append(data)
+        if self._current_dd is not None:
+            self._current_dd.append(data)
 
     def parsed(self) -> _ParsedHTML:
         parsed = _ParsedHTML()
@@ -254,18 +316,21 @@ def extract_key_values(html: str) -> Dict[str, str]:
     parsed = parse_html(html)
     key_values: Dict[str, str] = {}
 
+    # Regex to detect form/noise content in values
+    _form_noise_re = re.compile(r"(?:输入|placeholder)|value\s*=|<(?:input|textarea)|select", re.IGNORECASE)
+
     for row in parsed.rows:
         if len(row) < 2:
             continue
         for index in range(0, len(row) - 1, 2):
             key = compact_text(row[index]).rstrip(":：")
             value = compact_text(row[index + 1])
-            if _looks_like_key(key) and value:
+            if _looks_like_key(key) and value and not _form_noise_re.search(value):
                 key_values.setdefault(key, value)
 
     for line in re.split(r"[\n\r]+|(?<=。)\s*", parsed.text):
         line = compact_text(line)
-        if not line or len(line) > 240:
+        if not line or len(line) > 240 or _form_noise_re.search(line):
             continue
         match = re.match(r"^([^:：]{2,30})[:：]\s*(.+)$", line)
         if not match:
@@ -280,7 +345,7 @@ def extract_key_values(html: str) -> Dict[str, str]:
 def _looks_like_key(key: str) -> bool:
     if not key or len(key) > 30:
         return False
-    noisy_tokens = {"序号", "文件", "下载"}
+    noisy_tokens = {"序号", "文件", "下载", "附件", "请输入", "会员", "退出", "登录", "注册"}
     return key not in noisy_tokens
 
 
@@ -427,6 +492,7 @@ class Ejy365Adapter:
         list_item: Optional[Ejy365ListItem] = None,
         auxiliary_json: Optional[Dict[str, Any]] = None,
         status_json: Optional[Dict[str, Any]] = None,
+        jmjl_detail: Optional[Dict[str, Any]] = None,
     ) -> Ejy365DetailBundle:
         parsed = parse_html(html)
         key_values = extract_key_values(html)
@@ -455,6 +521,10 @@ class Ejy365Adapter:
         }
         if list_item:
             raw_payloads["list_html"] = list_item.raw_html
+        if jmjl_detail:
+            raw_payloads["jmjl_detail"] = jmjl_detail
+
+        bid_records_json = self._extract_bid_records(jmjl_detail) if jmjl_detail else None
 
         return Ejy365DetailBundle(
             url=url,
@@ -469,6 +539,8 @@ class Ejy365Adapter:
             title=title,
             source_item_id=source_item_id,
             raw_payloads=raw_payloads,
+            bid_records_json=bid_records_json,
+            jmjl_detail=jmjl_detail,
         )
 
     def build_ai_context(self, bundle: Ejy365DetailBundle) -> AIExtractionContext:
@@ -529,7 +601,7 @@ class Ejy365Adapter:
         )
         title_value, title_label = find_by_labels(bundle.key_values, ("项目名称", "标的名称", "转让标的名称"))
         title = first_non_blank(title_value, bundle.title, list_item.title if list_item else None)
-        location_value, location_label = find_by_labels(bundle.key_values, ("项目所在地", "地区", "标的所在地", "所在地"))
+        location_value, location_label = find_by_labels(bundle.key_values, ("项目所在地", "地区", "标的所在地", "所在地", "咨询地址", "单位地址"))
         location = first_non_blank(location_value, list_item.region if list_item else None)
         status_value, status_label = find_by_labels(bundle.key_values, ("项目状态", "状态", "交易状态"))
         status = first_non_blank(
@@ -540,12 +612,21 @@ class Ejy365Adapter:
         contact_value, contact_label = find_by_labels(bundle.key_values, ("联系人", "联系方式", "联系电话", "咨询电话"))
         contact = first_non_blank(contact_value, self._extract_contact_line(bundle.detail_text))
         notice = self._extract_special_notice(bundle.detail_text)
+        disposal_party_value, disposal_party_label = find_by_labels(
+            bundle.key_values, ("转让方名称", "转让人名称", "转让方", "委托方", "出让方", "处置方", "招商主体")
+        )
 
-        start_price, start_label = find_by_labels(bundle.key_values, ("起拍价", "起始价", "拍卖底价"))
+        start_price, start_label = find_by_labels(bundle.key_values, ("起拍价", "起始价", "拍卖底价", "转让底价", "转让底价（元）", "挂牌价", "挂牌价格"))
         final_price, final_label = find_by_labels(
             bundle.key_values,
             ("成交价", "当前价", "最高报价", "挂牌价格", "挂牌价", "转让底价", "转让价格", "价格"),
         )
+        if start_price and not self._is_price_value(start_price):
+            start_price = None
+            start_label = None
+        if final_price and not self._is_price_value(final_price):
+            final_price = None
+            final_label = None
         if not final_price and list_item and list_item.price_raw:
             final_price = list_item.price_raw
             final_label = "挂牌价"
@@ -555,8 +636,10 @@ class Ejy365Adapter:
                 ("price", "offer", "listingPrice", "gpjg", "bjjg", "currentPrice", "finalPrice"),
             )
             if compact_text(aux_price):
-                final_price = compact_text(aux_price)
-                final_label = "auxiliary_json.price"
+                aux_price_text = compact_text(aux_price)
+                if self._is_price_value(aux_price_text):
+                    final_price = aux_price_text
+                    final_label = "auxiliary_json.price"
 
         price_basis = self._price_basis(final_label)
         attachments_json = json.dumps(bundle.attachments, ensure_ascii=False)
@@ -631,12 +714,72 @@ class Ejy365Adapter:
             f"{contact_label}：{contact}" if contact_label else contact,
         )
         set_field("special_notice", notice, "detail_html", "detail_text.special_notice", notice)
+        set_field("disposal_party", disposal_party_value, "detail_html", f"key_values.{disposal_party_label}" if disposal_party_label else "detail_text", disposal_party_value)
         set_field("attachments_json", attachments_json, "detail_html", "attachments", attachments_json)
         set_field("data_source", "e交易", "computed", "adapter.data_source", "e交易", "constant", 1.0)
         set_field("price_basis", price_basis, "detail_html", f"key_values.{final_label}" if final_label else "price_candidates.final_price", price_basis)
 
         common["field_results"] = results
         return common
+
+    def map_special_candidates(self, bundle: Ejy365DetailBundle, asset_group: str) -> Dict[str, Any]:
+        if asset_group != "debt":
+            return {}
+        details = self.extract_debt_details(bundle)
+        if not details:
+            return {}
+        first_detail = details[0]
+        creditor, _ = find_by_labels(
+            bundle.key_values,
+            ("债权人", "权利人", "转让方", "出让方", "委托方", "委托人"),
+        )
+        values: Dict[str, Any] = {}
+        for field_key, detail_key in (
+            ("debtor_name", "debtor_name"),
+            ("guarantee_method", "guarantee_method"),
+            ("litigation_status", "litigation_status"),
+            ("benchmark_date", "benchmark_date"),
+        ):
+            value = compact_text(first_detail.get(detail_key))
+            if value:
+                values[field_key] = value
+        if creditor:
+            values["creditor"] = creditor
+        values["household_count"] = str(len(details))
+        return values
+
+    def extract_debt_details(self, bundle: Ejy365DetailBundle) -> List[Dict[str, Any]]:
+        def value_for(labels: Iterable[str]) -> Tuple[Optional[str], Optional[str]]:
+            return find_by_labels(bundle.key_values, labels)
+
+        debtor_name, debtor_label = value_for(("主债务人名称", "债务人名称", "主债务人", "债务人", "借款人", "客户名称", "贷款主体"))
+        claim_total, claim_total_label = value_for(("债权总额", "债权合计", "债权金额", "债权余额", "转让债权金额", "合计金额"))
+        principal, principal_label = value_for(("本金余额", "本金", "债权本金", "贷款本金", "借款本金", "剩余本金", "接收时本金"))
+        interest, interest_label = value_for(("利息余额", "利息", "债权利息", "欠息", "罚息", "剩余利息", "待偿还利息"))
+        guarantee, guarantee_label = value_for(("担保方式", "担保情况", "保证人", "担保人", "抵押物", "质押物", "抵质押物", "债权抵押情况"))
+        collateral, collateral_label = value_for(("抵押物", "质押物", "抵质押物", "担保物", "质押物详情", "抵押物详情"))
+        litigation, litigation_label = value_for(("诉讼状态", "执行状态", "案件状态", "债权状态", "诉讼执行情况"))
+        benchmark, benchmark_label = value_for(("基准日", "债权基准日", "截止日", "截至日", "截止日期"))
+
+        if not any((debtor_name, claim_total, principal, interest, guarantee, collateral, litigation)):
+            return []
+
+        detail: Dict[str, Any] = {
+            "sequence_no": "1",
+            "debtor_name": compact_text(debtor_name),
+            "debtor_or_asset": compact_text(debtor_name),
+            "claim_total": self._debt_value_with_unit(claim_total, claim_total_label),
+            "principal_balance": self._debt_value_with_unit(principal, principal_label),
+            "interest_balance": self._debt_value_with_unit(interest, interest_label),
+            "guarantee_method": compact_text(guarantee),
+            "guarantor_or_related_party": compact_text(guarantee),
+            "collateral": compact_text(collateral),
+            "litigation_status": compact_text(litigation),
+            "benchmark_date": compact_text(benchmark),
+            "amount_unit": self._label_unit(claim_total_label or principal_label or interest_label),
+            "source_excerpt": json.dumps(bundle.key_values, ensure_ascii=False),
+        }
+        return [{key: value for key, value in detail.items() if compact_text(value)}]
 
     def _iter_detail_anchor_blocks(self, html: str) -> Iterable[Tuple[str, str, str]]:
         anchor_re = re.compile(
@@ -694,6 +837,8 @@ class Ejy365Adapter:
             if not is_file or "/info/" in href:
                 continue
             absolute_url = urljoin(base_url or DEFAULT_BASE_URL, href)
+            if self._is_generic_site_attachment(absolute_url, text):
+                continue
             if absolute_url in seen:
                 continue
             seen.add(absolute_url)
@@ -709,29 +854,200 @@ class Ejy365Adapter:
             )
         return attachments
 
+    def _is_generic_site_attachment(self, url: str, name: str = "") -> bool:
+        lower_url = (url or "").lower()
+        lower_name = compact_text(name).lower()
+        if "/static/html/" in lower_url:
+            return True
+        generic_name_tokens = (
+            "产权贷",
+            "借款人条件",
+            "借款产品",
+            "真实性承诺",
+            "贷款申请资料",
+            "cdqdksqzlqd",
+            "jkrtjjjkcpnr",
+            "zsxcns",
+        )
+        return any(token.lower() in lower_name or token.lower() in lower_url for token in generic_name_tokens)
+
+    def _extract_bid_records(self, jmjl_detail: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not isinstance(jmjl_detail, dict):
+            return []
+        raw_records: List[Any] = []
+        for key in ("baojiaHis", "his", "bidList", "records", "data"):
+            value = jmjl_detail.get(key)
+            if isinstance(value, list):
+                raw_records.extend(value)
+
+        records: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in raw_records:
+            if not isinstance(entry, dict):
+                continue
+            price = first_non_blank(
+                entry.get("price"),
+                entry.get("bidPrice"),
+                entry.get("offer"),
+                entry.get("amount"),
+                entry.get("bjjg"),
+                entry.get("报价"),
+                entry.get("报价金额"),
+            )
+            bid_time = first_non_blank(
+                entry.get("bidTime"),
+                entry.get("time"),
+                entry.get("createTime"),
+                entry.get("bjsj"),
+                entry.get("报价时间"),
+                entry.get("出价时间"),
+            )
+            bidder = first_non_blank(
+                entry.get("username"),
+                entry.get("userName"),
+                entry.get("buyer"),
+                entry.get("memberName"),
+                entry.get("报价人"),
+                entry.get("竞买人"),
+            )
+            if not any((price, bid_time, bidder)):
+                continue
+            record: Dict[str, Any] = {}
+            if bid_time:
+                record["bid_time"] = bid_time
+            if price:
+                record["price"] = price
+            if bidder:
+                record["bidder"] = bidder
+            for extra_key in ("isPrior", "whetherMyBid", "status", "rank"):
+                if extra_key in entry:
+                    record[extra_key] = entry.get(extra_key)
+            dedupe_key = json.dumps(record, ensure_ascii=False, sort_keys=True)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            records.append(record)
+        return records
+
     def _extract_image_urls(self, html: str, base_url: str) -> List[str]:
         image_urls: List[str] = []
         seen: set[str] = set()
-        for match in re.finditer(r"""(?is)<img\b[^>]*(?:src|data-src|data-original)\s*=\s*['"]([^'"]+)['"]""", html or ""):
+        for match in re.finditer(
+            r"""(?is)<img\b[^>]*\b(?:src|data-src|data-original|data-lazy-src|data-url)\s*=\s*['"]([^'"]+)['"]""",
+            html or "",
+        ):
             raw_url = compact_text(match.group(1))
             if not raw_url or raw_url.startswith("data:"):
                 continue
             absolute_url = urljoin(base_url or DEFAULT_BASE_URL, raw_url)
+            if not self._is_item_image_url(absolute_url):
+                continue
             if absolute_url in seen:
                 continue
             seen.add(absolute_url)
             image_urls.append(absolute_url)
         return image_urls
 
+    def _is_item_image_url(self, url: str) -> bool:
+        parsed = urlparse(url)
+        lower_url = url.lower()
+        lower_path = (parsed.path or "").lower()
+        if not re.search(r"\.(?:(?:jpg|jpeg)|(?:png|webp)|gif)(?:$|[?#])", lower_url):
+            return False
+        if any(
+            token in lower_url
+            for token in (
+                "qrcode",
+                "qr-code",
+                "captcha",
+                "valcode",
+                "verify",
+                "logo",
+                "icon",
+                "kefu",
+                "/upload/ad/",
+                "/ad/",
+                "banner",
+                "advert",
+            )
+        ):
+            return False
+        if "pic.ejy365.com" in parsed.netloc.lower():
+            return True
+        return any(token in lower_path for token in ("/upload/", "/uploads/", "/file/", "/files/", "/project/", "/cqjy/"))
+
+    def _label_unit(self, label: Optional[str]) -> Optional[str]:
+        text = compact_text(label)
+        if "亿元" in text or "人民币亿元" in text:
+            return "亿元"
+        if "万元" in text or "人民币万元" in text:
+            return "万元"
+        if "元" in text or "人民币元" in text:
+            return "元"
+        return None
+
+    def _debt_value_with_unit(self, value: Any, label: Optional[str]) -> Optional[str]:
+        text = compact_text(value)
+        if not text:
+            return None
+        if re.search(r"((?:元|万元)|(?:亿元|人民币))", text):
+            return text
+        unit = self._label_unit(label)
+        return f"{text}{unit}" if unit else text
+
+    def _extract_infoid(self, html: str) -> Optional[str]:
+        """从详情页 HTML 中提取项目内部 ID (infoid)，用于竞买记录 API 调用"""
+        if not html:
+            return None
+        # 1. 从 iframe url 中提取: jmjl?infoid=XXX
+        m = re.search(r'jmjl\?infoid=([^"&]+)', html)
+        if m:
+            return m.group(1)
+        # 2. 从 JS 变量中提取: projectguid = "XXX" 或 infoid = "XXX"
+        m = re.search(r'(?:(?:projectguid|infoid))\s*[=:]\s*["\']([^"\']+)["\']', html)
+        if m:
+            return m.group(1)
+        return None
+
+    def fetch_jmjl_detail(self, infoid: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
+        """调用 e交易竞买记录 API 获取竞买历史数据"""
+        if not infoid:
+            return None
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": f"{DEFAULT_BASE_URL}/jmjl?infoid={infoid}",
+            }
+            resp = requests.get(
+                f"{JMJL_API_URL}?infoid={infoid}",
+                headers=headers,
+                timeout=timeout,
+            )
+            if resp.status_code == 200 and resp.text.strip():
+                data = resp.json()
+                if isinstance(data, dict) and data.get("gg"):
+                    return data
+            return None
+        except Exception:
+            return None
+
     def _extract_contact_line(self, text: str) -> Optional[str]:
+        # Regex to detect form-like / input placeholder noise
+        form_noise = re.compile(r"(?:输入|placeholder)|value\s*=|<(?:input|textarea)|(?:select|class)\s*=", re.IGNORECASE)
         for line in re.split(r"[\n\r。；;]+", text or ""):
             line = compact_text(line)
+            if not line or form_noise.search(line):
+                continue
             if any(token in line for token in ("联系人", "联系电话", "联系方式", "咨询电话")):
+                # Skip if it looks like a generic form label with no actual contact info
+                if len(line) > 80 or not re.search(r"\d", line):
+                    continue
                 return line
         return None
 
     def _extract_special_notice(self, text: str) -> Optional[str]:
-        match = re.search(r"(特别提示|特别告知|重要提示)\s*[:：]\s*([^。；;\n\r]+(?:。)?)", text or "")
+        match = re.search(r"((?:特别提示|特别告知)|重要提示)\s*[:：]\s*([^。；;\n\r]+(?:。)?)", text or "")
         if match:
             return compact_text(match.group(0))
         return None
@@ -750,3 +1066,11 @@ class Ejy365Adapter:
         if "转让" in label:
             return "转让价"
         return label
+
+    def _is_price_value(self, value: Any) -> bool:
+        text = compact_text(value)
+        if not text:
+            return False
+        if re.search(r"\d", text):
+            return True
+        return any(token in text for token in ("面议", "详见", "无底价", "免费", "以公告为准", "另行通知"))
