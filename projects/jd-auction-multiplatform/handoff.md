@@ -297,3 +297,29 @@ python -m pytest tests\test_web_admin_task_runtime.py -q
 ```
 
 仍建议下一步补一个“活跃 worker 锁”或“同一页面只允许一个解析批次运行”的保护，否则重复点击虽然符合当前实现，但容易造成用户误以为系统重复处理、成本失控或任务数量异常增长。
+
+## 9. 2026-07-10 20:35 补充：本轮代码已提交并推送
+
+本轮把当前项目代码同步到了 GitHub 仓库：
+
+- 本地工作目录：`F:\codex_project\jd`
+- Git 仓库目录：`F:\codex_project\credit-claim-extraction`
+- 仓库内项目目录：`projects/jd-auction-multiplatform`
+- 提交：`5f7798a Sync auction collection platform updates`
+- 推送方式：HTTPS 推送连续失败，报 `HTTP 408` / `Connection was reset`；随后使用 SSH URL `git@github.com:ling1-1/credit-claim-extraction.git` 推送成功。
+
+提交前检查：
+
+```powershell
+python -m pytest tests\test_web_admin_task_runtime.py -q
+python -m py_compile web_admin\routers\queues.py web_admin\services\task_trigger.py web_admin\services\ai_queue_auto.py
+```
+
+结果：
+
+```text
+14 passed
+py_compile exit 0
+```
+
+推送前已确认未把 `.env`、数据库文件、日志、输出目录、图片、Excel、pyc 等文件加入暂存区。源码敏感词扫描只命中了 `.env.example`、文档占位符、测试假 key 和函数参数名，没有发现真实 API Key 或 MySQL 密码。
