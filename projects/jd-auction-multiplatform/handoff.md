@@ -323,3 +323,24 @@ py_compile exit 0
 ```
 
 推送前已确认未把 `.env`、数据库文件、日志、输出目录、图片、Excel、pyc 等文件加入暂存区。源码敏感词扫描只命中了 `.env.example`、文档占位符、测试假 key 和函数参数名，没有发现真实 API Key 或 MySQL 密码。
+## 10. 2026-07-10 20:45 补充：远端同步状态已核验
+
+本轮继续完成了 GitHub 远端状态核验：
+
+- 使用 SSH 显式 fetch：
+  `git -C F:\codex_project\credit-claim-extraction fetch git@github.com:ling1-1/credit-claim-extraction.git main:refs/remotes/origin/main`
+- 本地 `HEAD` 与 `origin/main` 均为：`bca747a`
+- `git status --short --branch` 只显示 `## main...origin/main`，没有额外未提交文件。
+
+因此本轮代码与 handoff 更新已经同步到 GitHub。
+
+需要向用户说明的行为结论：
+
+- 队列按钮原先叫“处理 20 条”是不准确的，已经改为“启动 AI 解析”。
+- 该按钮触发后台 AI worker，不是同步处理固定 20 条。
+- “20”只是最多领取候选任务数量；实际同时解析数量由并发控制决定。
+- 如果并发为 3，页面只看到 3 条 `parsing` 是正常的。
+- 同一批任务使用同一个模型通常是因为任务类型路由命中了同一个 profile。
+- 重复点击会启动新的后台 worker，所以解析数量会增加，后续也可能由不同模型处理。
+
+仍建议后续增加“活跃 worker 防重复触发”或“同一页面同一批次只允许一个运行中 worker”的保护，避免误点击导致成本和任务数量失控。
