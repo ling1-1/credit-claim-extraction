@@ -190,6 +190,69 @@
       text-align: center;
       padding: 28px 0;
     }
+    .login-screen {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+      background: #eef2f6;
+    }
+    .login-shell {
+      width: min(980px, 100%);
+      min-height: 520px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 420px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 18px 50px rgba(15, 23, 42, .12);
+      overflow: hidden;
+    }
+    .login-visual {
+      padding: 42px;
+      background: #0f766e;
+      color: #ffffff;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 28px;
+    }
+    .login-badge {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      border: 1px solid rgba(255,255,255,.35);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 12px;
+      color: rgba(255,255,255,.9);
+      background: rgba(255,255,255,.12);
+    }
+    .login-visual h1 { margin: 18px 0 12px; font-size: 30px; line-height: 1.25; }
+    .login-visual p { margin: 0; color: rgba(255,255,255,.82); line-height: 1.75; max-width: 520px; }
+    .login-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .login-metric {
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 6px;
+      padding: 12px;
+      background: rgba(255,255,255,.1);
+    }
+    .login-metric strong { display: block; font-size: 18px; margin-bottom: 4px; }
+    .login-metric span { color: rgba(255,255,255,.76); font-size: 12px; }
+    .login-card {
+      padding: 42px 36px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .login-card h2 { margin: 0 0 6px; font-size: 22px; }
+    .login-card p { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
+    .login-footnote { margin-top: 16px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 
     .el-table { --el-table-header-bg-color: #f1f5f9; font-size: 13px; }
     .el-button { border-radius: 4px; }
@@ -216,6 +279,11 @@
       .nav-item { white-space: nowrap; }
       .topbar { align-items: flex-start; height: auto; padding: 10px 12px; flex-direction: column; gap: 8px; }
       .content { padding: 12px; }
+      .login-screen { padding: 16px; }
+      .login-shell { grid-template-columns: 1fr; min-height: auto; }
+      .login-visual { padding: 28px; }
+      .login-metrics { grid-template-columns: 1fr; }
+      .login-card { padding: 28px; }
     }
   </style>
 </head>
@@ -432,6 +500,16 @@ function numberOf(value) {
 function formatTime(value) {
   if (!value) return "-";
   return String(value).replace("T", " ").replace(/\.\d+$/, "");
+}
+
+function safeSourceUrl(value) {
+  const text = String(value || "").trim();
+  return /^https?:\/\//i.test(text) ? text : "";
+}
+
+function shortUrl(value) {
+  const text = String(value || "");
+  return text.length > 60 ? text.slice(0, 60) + "..." : text;
 }
 
 function platformName(value) {
@@ -1181,15 +1259,18 @@ const ItemDetailPage = {
 
     // 下载走代理（添加 Content-Disposition: attachment header）
     function downloadUrl(res) {
-      if (!res || !res.resource_id) return "";
+      if (!res) return "";
+      if (!res.resource_id && res.resource_url) return res.resource_url;
+      if (!res.resource_id) return "";
       return `/api/items/resource/${res.resource_id}/proxy?download=1`;
     }
 
     // 根据扩展名判断文件图标/类别
     function getExt(name) {
       if (!name) return "";
-      const i = name.lastIndexOf(".");
-      return i >= 0 ? name.slice(i).toLowerCase() : "";
+      const clean = String(name).split(/[?#]/)[0];
+      const i = clean.lastIndexOf(".");
+      return i >= 0 ? clean.slice(i).toLowerCase() : "";
     }
 
     function isImage(ext) {
@@ -1273,6 +1354,43 @@ const ItemDetailPage = {
       return (bytes / (1024 * 1024)).toFixed(1) + " MB";
     }
 
+    function parseJsonMaybe(value) {
+      if (Array.isArray(value) || (value && typeof value === "object")) return value;
+      if (typeof value !== "string") return value;
+      const text = value.trim();
+      if (!text || !/^[\[{]/.test(text)) return value;
+      try { return JSON.parse(text); } catch (_e) { return value; }
+    }
+
+    function formatMoney(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      const num = Number(value);
+      if (Number.isFinite(num)) return num.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " 元";
+      return String(value);
+    }
+
+    function formatBidTime(value) {
+      if (!value) return "-";
+      let raw = value;
+      if (typeof raw === "string" && /^\d+$/.test(raw.trim())) raw = Number(raw.trim());
+      if (typeof raw === "number" && Number.isFinite(raw)) {
+        const ms = raw > 100000000000 ? raw : raw * 1000;
+        const dt = new Date(ms);
+        if (!Number.isNaN(dt.getTime())) {
+          const pad = (n) => String(n).padStart(2, "0");
+          return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+        }
+      }
+      return formatTime(raw);
+    }
+
+    function bidFlagText(row) {
+      const parts = [];
+      if (row.isPrior === 1 || row.isPrior === true || row.isPrior === "1") parts.push("领先");
+      if (row.whetherMyBid === 1 || row.whetherMyBid === true || row.whetherMyBid === "1") parts.push("我的出价");
+      return parts.join(" / ") || "-";
+    }
+
     const commonRows = computed(() => {
       const item = data.value?.item || {};
       return [
@@ -1294,12 +1412,91 @@ const ItemDetailPage = {
         ["联系方式", item.contact_info],
         ["特别告知", item.special_notice],
         ["评估价格及时间", item.assessment_price_display],
-        ["出价记录", item.bid_records_json],
-        ["来源页面", item.source_url ? (item.source_url.startsWith('http') ? `<a href="${item.source_url}" target="_blank" rel="noopener noreferrer" class="link">${item.source_url.length > 60 ? item.source_url.slice(0, 60) + '...' : item.source_url}</a>` : item.source_url) : "无"],
+        ["出价记录", bidRecords.value.length ? `共 ${bidRecords.value.length} 条，见下方表格` : "无"],
+        ["来源页面", item.source_url || ""],
         ["批次", item.batch_id],
         ["最后采集", formatTime(item.last_crawled_at)]
       ];
     });
+
+    const bidRecords = computed(() => {
+      const raw = parseJsonMaybe(data.value?.item?.bid_records_json);
+      let rows = [];
+      if (Array.isArray(raw)) rows = raw;
+      else if (raw && typeof raw === "object") {
+        for (const key of ["bidList", "bids", "data", "records", "list"]) {
+          if (Array.isArray(raw[key])) {
+            rows = raw[key];
+            break;
+          }
+        }
+      }
+      return rows
+        .filter(row => row && typeof row === "object")
+        .map((row, idx) => ({
+          index: idx + 1,
+          price: row.price ?? row.bidPrice ?? row.currentPrice ?? row.amount,
+          bidTime: row.bidTime ?? row.time ?? row.createTime ?? row.createdAt,
+          username: row.username ?? row.userName ?? row.bidderName ?? row.bidder ?? row.userId,
+          flag: bidFlagText(row),
+        }));
+    });
+
+    function extractImageUrls(value) {
+      const found = [];
+      const seen = new Set();
+      const normalizeFieldImageUrl = (url) => {
+        const text = String(url || "").trim();
+        if (!text) return "";
+        if (text.startsWith("//")) return "https:" + text;
+        if (text.startsWith("jfs/")) return "https://img30.360buyimg.com/popWaterMark/" + text;
+        return text;
+      };
+      const add = (url) => {
+        const text = normalizeFieldImageUrl(url);
+        if (!text || seen.has(text)) return;
+        const ext = getExt(text);
+        if (/^https?:\/\//i.test(text) && isImage(ext)) {
+          seen.add(text);
+          found.push(text);
+        }
+      };
+      const walk = (node) => {
+        const parsed = parseJsonMaybe(node);
+        if (typeof parsed === "string") {
+          const matches = parsed.match(/https?:\/\/[^\s"'<>，。；;]+/g) || [];
+          matches.forEach(add);
+          const jdMatches = parsed.match(/jfs\/[^\s"'<>，。；;]+/g) || [];
+          jdMatches.forEach(add);
+          return;
+        }
+        if (Array.isArray(parsed)) {
+          parsed.forEach(walk);
+          return;
+        }
+        if (parsed && typeof parsed === "object") {
+          Object.values(parsed).forEach(walk);
+        }
+      };
+      walk(value);
+      return found;
+    }
+
+    function specialImageUrls(row) {
+      return extractImageUrls(row?.value);
+    }
+
+    function openFieldImagePreview(url, row, index) {
+      const ext = getExt(url);
+      previewItem.value = {
+        resource_type: "image",
+        resource_name: `${row?.label || "现场图片"} ${index + 1}`,
+        resource_url: url,
+        source_section: row?.label || "特有字段",
+        _ext: ext,
+      };
+      previewVisible.value = true;
+    }
     // 特有字段：以 asset_* 表列为基准，并合并 field_extractions 的 special 命名空间字段
     // （对齐查看器 jd_viewer，补回因 v2 资产表列少于 SPECIAL_FIELDS 而缺失的特有字段）
     const specialRows = computed(() => {
@@ -1337,7 +1534,9 @@ const ItemDetailPage = {
       platformName, formatTime, fieldRows, fieldLabel, detailColumns,
       groupedResources, iconFor, iconColor, typeLabel, roleLabel,
       proxyUrl, downloadUrl, openPreview, closePreview,
-      previewItem, previewVisible, formatSize, isImage, isPdf, isVideo, isOffice
+      previewItem, previewVisible, formatSize, isImage, isPdf, isVideo, isOffice,
+      bidRecords, formatBidTime, formatMoney, specialImageUrls, openFieldImagePreview,
+      safeSourceUrl, shortUrl
     };
   },
   template: `
@@ -1359,13 +1558,47 @@ const ItemDetailPage = {
           <el-tab-pane label="共有字段" name="common">
             <el-table :data="commonRows" border size="small">
               <el-table-column prop="0" label="字段" width="180" />
-              <el-table-column label="值"><template #default="{row}"><span class="pre" style="display:block" v-if="row[0] !== '来源页面'">{{ textOf(row[1], "空") }}</span><span v-else class="pre" style="display:block" v-html="row[1] || '无'"></span></template></el-table-column>
+              <el-table-column label="值">
+                <template #default="{row}">
+                  <span class="pre" style="display:block" v-if="row[0] !== '来源页面'">{{ textOf(row[1], "空") }}</span>
+                  <span v-else class="pre" style="display:block">
+                    <a v-if="safeSourceUrl(row[1])" :href="safeSourceUrl(row[1])" target="_blank" rel="noopener noreferrer" class="link">{{ shortUrl(row[1]) }}</a>
+                    <span v-else>{{ textOf(row[1], "无") }}</span>
+                  </span>
+                </template>
+              </el-table-column>
             </el-table>
+            <div v-if="bidRecords.length" style="margin-top:14px">
+              <h4 style="margin:0 0 10px 0;font-size:14px;color:var(--primary)">出价记录</h4>
+              <el-table :data="bidRecords" border size="small">
+                <el-table-column prop="index" label="#" width="60" />
+                <el-table-column label="出价金额" width="160"><template #default="{row}">{{ formatMoney(row.price) }}</template></el-table-column>
+                <el-table-column label="出价时间" width="180"><template #default="{row}">{{ formatBidTime(row.bidTime) }}</template></el-table-column>
+                <el-table-column label="出价人" min-width="160"><template #default="{row}">{{ textOf(row.username, "-") }}</template></el-table-column>
+                <el-table-column label="状态" width="130"><template #default="{row}">{{ row.flag }}</template></el-table-column>
+              </el-table>
+            </div>
           </el-tab-pane>
           <el-tab-pane label="特有字段" name="special">
             <el-table :data="specialRows" border size="small" empty-text="暂无特有字段">
               <el-table-column prop="label" label="字段" width="220" />
-              <el-table-column label="值"><template #default="{row}"><span class="pre" style="display:block">{{ textOf(row.value, "空") }}</span></template></el-table-column>
+              <el-table-column label="值">
+                <template #default="{row}">
+                  <div v-if="specialImageUrls(row).length" style="display:flex;gap:8px;flex-wrap:wrap">
+                    <img
+                      v-for="(url, idx) in specialImageUrls(row)"
+                      :key="url"
+                      class="field-preview-image"
+                      :src="url"
+                      :alt="row.label"
+                      style="width:96px;height:72px;object-fit:cover;border:1px solid var(--line);border-radius:4px;cursor:pointer;background:#f5f5f5"
+                      @click="openFieldImagePreview(url, row, idx)"
+                      loading="lazy"
+                    />
+                  </div>
+                  <span v-else class="pre" style="display:block">{{ textOf(row.value, "空") }}</span>
+                </template>
+              </el-table-column>
             </el-table>
           </el-tab-pane>
 
@@ -1631,6 +1864,24 @@ const QueuesPage = {
         ElMessage.error(err.message || "操作失败");
       }
     }
+    async function processSelected() {
+      if (!selectedIds.value.length) { ElMessage.warning("请先选择要处理的任务"); return; }
+      try {
+        const res = await apiRequest("/api/queues/ai/process-selected", {
+          method: "POST",
+          body: JSON.stringify({
+            task_ids: selectedIds.value,
+            ai_profile: selectedProfile.value || "",
+            concurrency: concurrency.value,
+          }),
+        });
+        ElMessage.success(`已优先处理 ${res.updated || selectedIds.value.length} 条选中任务`);
+        selectedIds.value = [];
+        await refresh();
+      } catch (err) {
+        ElMessage.error(err.message || "操作失败");
+      }
+    }
     async function action(url, message) {
       try {
         const res = await apiRequest(url, { method: "POST" });
@@ -1705,12 +1956,33 @@ const QueuesPage = {
       return { icon: "⚠️", text: s.slice(0, 80) };
     }
     const checkpoints = ref([]);
+    const checkpointError = ref("");
     async function loadCheckpoints() {
-      try { const r = await apiRequest("/api/queues/crawl/checkpoints"); checkpoints.value = r.items || []; }
-      catch (e) { checkpoints.value = []; }
+      try {
+        const r = await apiRequest("/api/queues/crawl/checkpoints");
+        checkpoints.value = r.items || [];
+        checkpointError.value = r.error || "";
+      }
+      catch (e) {
+        checkpoints.value = [];
+        checkpointError.value = e.message || String(e);
+      }
+    }
+    async function resumeCheckpoint(row) {
+      try {
+        const params = new URLSearchParams({
+          source_platform: row.source_platform || "",
+          category_key: row.category_key || "default",
+        });
+        const res = await apiRequest(`/api/queues/crawl/checkpoints/resume?${params}`, { method: "POST" });
+        ElMessage.success(res.warning || `已触发继续采集：${res.task_id}`);
+        await loadCheckpoints();
+      } catch (err) {
+        ElMessage.error(err.message || "继续采集失败");
+      }
     }
     onMounted(() => { loadProfiles(); refresh(); loadAuto(); loadCheckpoints(); });
-    return { loading, error, stats, tasks, total, filters, refresh, action, formatTime, textOf, onQueueFilterChange, onQueuePageChange, concurrency, autoConfig, profiles, selectedProfile, processQueue, saveAuto, retrySelected, retryFiltered, pausePendingRunning, resumePaused, selectionChange, selectedIds, aiErrorMsg, modelText, checkpoints, loadCheckpoints, PLATFORM_LABELS };
+    return { loading, error, stats, tasks, total, filters, refresh, action, formatTime, textOf, onQueueFilterChange, onQueuePageChange, concurrency, autoConfig, profiles, selectedProfile, processQueue, processSelected, saveAuto, retrySelected, retryFiltered, pausePendingRunning, resumePaused, selectionChange, selectedIds, aiErrorMsg, modelText, checkpoints, checkpointError, loadCheckpoints, resumeCheckpoint, PLATFORM_LABELS };
   },
   template: `
     <section>
@@ -1733,6 +2005,7 @@ const QueuesPage = {
           >
             <el-button type="primary" plain @click="processQueue">启动 AI 解析</el-button>
           </el-tooltip>
+          <el-button type="primary" @click="processSelected" :disabled="!selectedIds.length">处理选中项 ({{ selectedIds.length }})</el-button>
           <el-button @click="pausePendingRunning" type="warning" plain>暂停未解析任务</el-button>
           <el-button @click="resumePaused" plain>恢复暂停任务</el-button>
           <el-button @click="retryFiltered" type="warning" plain>重试当前筛选失败</el-button>
@@ -1803,17 +2076,24 @@ const QueuesPage = {
       </div>
       <div class="section" style="margin-top:14px">
         <h2 style="display:flex;justify-content:space-between;align-items:center">
-          <span>📌 采集断点</span>
+          <span>采集断点</span>
           <el-button size="small" @click="loadCheckpoints">刷新</el-button>
         </h2>
+        <ErrorBox :message="checkpointError" />
         <el-table :data="checkpoints" v-loading="loading" empty-text="暂无断点记录" size="small">
           <el-table-column prop="source_platform" label="平台" width="100"><template #default="{row}">{{ PLATFORM_LABELS[row.source_platform] || row.source_platform }}</template></el-table-column>
           <el-table-column prop="category_key" label="分类" width="90" />
+          <el-table-column prop="checkpoint_status" label="状态" width="90" />
+          <el-table-column prop="crawl_mode" label="模式" width="90" />
           <el-table-column prop="total_items_seen" label="已处理" width="80" />
           <el-table-column prop="current_page" label="当前页" width="70" />
           <el-table-column prop="last_item_id" label="最后标的" min-width="180" show-overflow-tooltip />
+          <el-table-column prop="batch_id" label="批次" min-width="140" show-overflow-tooltip />
+          <el-table-column prop="message" label="说明" min-width="180" show-overflow-tooltip />
           <el-table-column prop="started_at" label="首次采集" width="160"><template #default="{row}">{{ formatTime(row.started_at) }}</template></el-table-column>
+          <el-table-column prop="completed_at" label="完成时间" width="160"><template #default="{row}">{{ formatTime(row.completed_at) }}</template></el-table-column>
           <el-table-column prop="updated_at" label="最后更新" width="160"><template #default="{row}">{{ formatTime(row.updated_at) }}</template></el-table-column>
+          <el-table-column label="操作" width="100" fixed="right"><template #default="{row}"><el-button size="small" type="primary" plain @click="resumeCheckpoint(row)">继续采集</el-button></template></el-table-column>
         </el-table>
       </div>
     </section>
@@ -2542,9 +2822,27 @@ const router = createRouter({
 
 const App = {
   setup() {
+    const auth = reactive({ loading: true, enabled: false, authenticated: true, username: "" });
+    const loginForm = reactive({ username: "admin", password: "" });
+    const loginError = ref("");
+    const loginLoading = ref(false);
     const scheduler = ref({});
     const runningTasks = ref(0);
     let timer = null;
+    async function refreshAuth() {
+      auth.loading = true;
+      try {
+        const res = await apiRequest("/api/auth/status");
+        auth.enabled = !!res.enabled;
+        auth.authenticated = !!res.authenticated;
+        auth.username = res.username || "";
+      } catch (_err) {
+        auth.enabled = false;
+        auth.authenticated = true;
+      } finally {
+        auth.loading = false;
+      }
+    }
     async function refreshHeader() {
       try {
         const [sch, tasks] = await Promise.all([apiRequest("/api/scheduler/status"), apiRequest("/api/tasks?include_finished=false")]);
@@ -2554,21 +2852,108 @@ const App = {
         scheduler.value = { running: false };
       }
     }
-    onMounted(() => {
+    function startHeaderTimer() {
+      if (timer) return;
       refreshHeader();
       timer = setInterval(refreshHeader, 15000);
+    }
+    async function submitLogin() {
+      loginLoading.value = true;
+      loginError.value = "";
+      try {
+        const res = await apiRequest("/api/auth/login", {
+          method: "POST",
+          body: JSON.stringify(loginForm)
+        });
+        auth.enabled = !!res.enabled;
+        auth.authenticated = !!res.authenticated;
+        auth.username = res.username || loginForm.username;
+        loginForm.password = "";
+        startHeaderTimer();
+      } catch (err) {
+        loginError.value = err.message || String(err);
+      } finally {
+        loginLoading.value = false;
+      }
+    }
+    async function logout() {
+      await apiRequest("/api/auth/logout", { method: "POST" }).catch(() => null);
+      auth.authenticated = false;
+      auth.username = "";
+      scheduler.value = {};
+      runningTasks.value = 0;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+    onMounted(async () => {
+      await refreshAuth();
+      if (!auth.enabled || auth.authenticated) startHeaderTimer();
     });
     onUnmounted(() => timer && clearInterval(timer));
-    return { scheduler, runningTasks };
+    return { auth, loginForm, loginError, loginLoading, scheduler, runningTasks, submitLogin, logout };
   },
   template: `
-    <div class="shell">
+    <div v-if="auth.loading" class="login-screen">
+      <div class="login-shell">
+        <div class="login-visual">
+          <div>
+            <span class="login-badge">Admin Console</span>
+            <h1>拍卖数据采集管理平台</h1>
+            <p>正在检查登录状态和后台服务连接。</p>
+          </div>
+          <div class="login-metrics">
+            <div class="login-metric"><strong>MySQL</strong><span>结构化存储</span></div>
+            <div class="login-metric"><strong>AI</strong><span>异步补提取</span></div>
+            <div class="login-metric"><strong>多平台</strong><span>统一调度</span></div>
+          </div>
+        </div>
+        <div class="login-card">
+          <h2>状态检查</h2>
+          <p>请稍候。</p>
+        </div>
+      </div>
+    </div>
+    <div v-else-if="auth.enabled && !auth.authenticated" class="login-screen">
+      <div class="login-shell">
+        <div class="login-visual">
+          <div>
+            <span class="login-badge">Protected Access</span>
+            <h1>拍卖数据采集管理平台</h1>
+            <p>统一管理多平台采集、批次状态、AI 队列、质量报告和模型配置。开放到局域网或公网前请保持认证开启。</p>
+          </div>
+          <div class="login-metrics">
+            <div class="login-metric"><strong>7+</strong><span>采集平台</span></div>
+            <div class="login-metric"><strong>V2</strong><span>MySQL 架构</span></div>
+            <div class="login-metric"><strong>断点</strong><span>可恢复采集</span></div>
+          </div>
+        </div>
+        <div class="login-card">
+          <h2>管理员登录</h2>
+          <p>输入管理员账号后进入后台。</p>
+          <el-form @submit.prevent="submitLogin" label-position="top">
+            <el-form-item label="用户名">
+              <el-input v-model="loginForm.username" autocomplete="username" size="large" />
+            </el-form-item>
+            <el-form-item label="密码">
+              <el-input v-model="loginForm.password" type="password" show-password autocomplete="current-password" size="large" @keyup.enter="submitLogin" />
+            </el-form-item>
+            <div v-if="loginError" class="error-box">{{ loginError }}</div>
+            <el-button type="primary" size="large" style="width:100%" :loading="loginLoading" @click="submitLogin">登录</el-button>
+          </el-form>
+          <div class="login-footnote">当前会话使用 HttpOnly Cookie 保存。公网部署时请启用 HTTPS 并设置安全密码。</div>
+        </div>
+      </div>
+    </div>
+    <div v-else class="shell">
       <header class="topbar">
         <div class="brand">拍卖数据采集管理平台</div>
         <div class="top-actions">
           <span class="top-pill"><span class="status-dot" :class="{ok: scheduler.running, bad: scheduler.running === false}"></span>调度器 {{ scheduler.running ? "运行中" : "未运行" }}</span>
           <span class="top-pill">后台任务 {{ runningTasks }}</span>
           <span class="top-pill">MySQL auction_data</span>
+          <el-button v-if="auth.enabled" size="small" @click="logout">退出</el-button>
         </div>
       </header>
       <div class="layout">

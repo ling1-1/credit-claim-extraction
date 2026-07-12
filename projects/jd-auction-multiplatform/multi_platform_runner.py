@@ -1,4 +1,4 @@
-
+﻿
 import argparse
 import json
 import os
@@ -7,7 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 try:
     from typing import Protocol, Optional
 except ImportError:
@@ -186,8 +186,8 @@ class PlatformCrawlResult:
     success_count: int = 0
     failed_count: int = 0
     errors: list[dict[str, str]] = field(default_factory=list)
-    list_total: int = 0          # 列表页实际返回的总条数(增量模式下为全量列表长度)
-    skipped_existing: int = 0    # 增量模式下因"已采集且列表指纹未变"跳过的条数
+    list_total: int = 0          # 鍒楄〃椤靛疄闄呰繑鍥炵殑鎬绘潯鏁?澧為噺妯″紡涓嬩负鍏ㄩ噺鍒楄〃闀垮害)
+    skipped_existing: int = 0    # 澧為噺妯″紡涓嬪洜"宸查噰闆嗕笖鍒楄〃鎸囩汗鏈彉"璺宠繃鐨勬潯鏁?
 
 
 class PlatformHandler(Protocol):
@@ -205,21 +205,74 @@ class PlatformHandler(Protocol):
 
 
 def _list_item_id(item: Any) -> str:
-    """从平台列表项中提取稳定的唯一 ID, 兼容各平台不同的 id 字段名。
+    """浠庡钩鍙板垪琛ㄩ」涓彁鍙栫ǔ瀹氱殑鍞竴 ID, 鍏煎鍚勫钩鍙颁笉鍚岀殑 id 瀛楁鍚嶃?
 
-    优先级: source_item_id > prj_id > item_id > project_no > slug > detail_url > source_url
-    用于增量去重与列表指纹, 确保 Cbex/Ali/Ejy365 等列表项缺少 source_item_id 字段时
-    也能正确提取 ID(否则增量去重会退化为只保留 1 条)。
+    浼樺厛绾? source_item_id > prj_id > item_id > project_no > slug > detail_url > source_url
+    鐢ㄤ簬澧為噺鍘婚噸涓庡垪琛ㄦ寚绾? 纭繚 Cbex/Ali/Ejy365 绛夊垪琛ㄩ」缂哄皯 source_item_id 瀛楁鏃?
+    涔熻兘姝ｇ‘鎻愬彇 ID(鍚﹀垯澧為噺鍘婚噸浼氶鍖栦负鍙繚鐣?1 鏉?銆?
     """
+    keys = (
+        "source_item_id",
+        "prj_id",
+        "item_id",
+        "project_no",
+        "slug",
+        "id",
+        "detail_url",
+        "source_url",
+        "url",
+    )
+    if isinstance(item, Mapping):
+        for key in keys:
+            text = compact_text(item.get(key))
+            if text:
+                return text
     return compact_text(
         getattr(item, "source_item_id", None)
         or getattr(item, "prj_id", None)
         or getattr(item, "item_id", None)
         or getattr(item, "project_no", None)
         or getattr(item, "slug", None)
+        or getattr(item, "id", None)
         or getattr(item, "detail_url", None)
         or getattr(item, "source_url", None)
+        or getattr(item, "url", None)
     ) or ""
+
+
+def _checkpoint_value(checkpoint: Any, key: str) -> Any:
+    if not checkpoint:
+        return None
+    if isinstance(checkpoint, Mapping):
+        return checkpoint.get(key)
+    return getattr(checkpoint, key, None)
+
+
+def _checkpoint_status(checkpoint: Any) -> str:
+    return compact_text(_checkpoint_value(checkpoint, "checkpoint_status") or "running").lower()
+
+
+def _should_resume_from_checkpoint(mode: str, checkpoint: Any) -> bool:
+    normalized_mode = compact_text(mode).lower()
+    if normalized_mode not in {"full", "incremental"} or not checkpoint:
+        return False
+    if not compact_text(_checkpoint_value(checkpoint, "last_item_id")):
+        return False
+    return _checkpoint_status(checkpoint) not in {"completed", "success"}
+
+
+def _items_after_checkpoint(items: list[Any], checkpoint: Any) -> list[Any]:
+    last_item_id = compact_text(_checkpoint_value(checkpoint, "last_item_id"))
+    if not last_item_id:
+        return list(items)
+    found = False
+    remaining: list[Any] = []
+    for item in items:
+        if found:
+            remaining.append(item)
+        elif _list_item_id(item) == last_item_id:
+            found = True
+    return remaining if found else list(items)
 
 
 def request_timeout_value(timeout: int | float | None) -> int | float | None:
@@ -240,7 +293,7 @@ def _parse_task_types_arg(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
-        raw_items = [part.strip() for part in re.split(r"[,/;，、\s]+", value) if part.strip()]
+        raw_items = [part.strip() for part in re.split(r"[,/;锛屻乗s]+", value) if part.strip()]
     elif isinstance(value, (list, tuple, set)):
         raw_items = [str(part).strip() for part in value if str(part).strip()]
     else:
@@ -568,70 +621,169 @@ class MultiPlatformRunner:
         self.item_concurrency = max(1, int(item_concurrency or 1))
         self.parse_attachments = parse_attachments
 
+    def _load_crawl_checkpoint(self, platform: str, category_key: str = "default") -> Any:
+        loader = getattr(self.db, "load_checkpoint", None)
+        if not callable(loader):
+            return None
+        try:
+            return loader(source_platform=platform, category_key=category_key)
+        except Exception:
+            return None
+
+    def _save_crawl_checkpoint(
+        self,
+        *,
+        platform: str,
+        batch_id: str,
+        mode: str,
+        status: str,
+        category_key: str = "default",
+        current_page: int = 1,
+        total_items_seen: int = 0,
+        last_item_id: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        saver = getattr(self.db, "save_checkpoint", None)
+        if not callable(saver):
+            return
+        try:
+            completed_at = jd_v2.now_text() if status in {"completed", "success", "failed"} else None
+            saver(
+                source_platform=platform,
+                category_key=category_key,
+                current_page=current_page,
+                total_items_seen=max(0, int(total_items_seen or 0)),
+                last_item_id=last_item_id,
+                batch_id=batch_id,
+                crawl_mode=mode,
+                checkpoint_status=status,
+                message=message,
+                completed_at=completed_at,
+            )
+        except Exception:
+            pass
+
     def crawl_platform(self, platform: str, limit: int = 10, mode: str = "sample") -> PlatformCrawlResult:
         if platform not in self.handlers:
             raise KeyError(f"unknown platform: {platform}")
+
         handler = self.handlers[platform]
-        # CBEX 的列表/详情都在浏览器上下文内 fetch 以绕过 WAF, Playwright 不能跨线程,
-        # 故强制单线程执行 (列表与详情均在同一平台线程内完成, 避免 RuntimeError)。
+        normalized_mode = compact_text(mode).lower() or "sample"
+        category_key = "default"
         eff_concurrency = 1 if platform == "cbex" else self.item_concurrency
+        batch_id = f"{platform}-{int(time.time())}"
+        result = PlatformCrawlResult(platform=platform, batch_id=batch_id)
+
+        checkpoint = self._load_crawl_checkpoint(platform, category_key)
+        resume_enabled = _should_resume_from_checkpoint(normalized_mode, checkpoint)
+        checkpoint_seen = int(_checkpoint_value(checkpoint, "total_items_seen") or 0) if resume_enabled else 0
+        checkpoint_last_id = compact_text(_checkpoint_value(checkpoint, "last_item_id")) if resume_enabled else ""
+        last_processed_id: str | None = checkpoint_last_id or None
+        processed_since_start = 0
+        status = "failed"
+
         crawl_with_db = getattr(handler, "crawl_with_db", None)
         if callable(crawl_with_db):
-            return crawl_with_db(self.db, limit, mode, ai_mode=self.ai_mode)
+            def adapter_checkpoint(**progress: Any) -> None:
+                self._save_crawl_checkpoint(
+                    platform=platform,
+                    batch_id=compact_text(progress.get("batch_id")) or batch_id,
+                    mode=normalized_mode,
+                    status=compact_text(progress.get("status")) or "running",
+                    category_key=compact_text(progress.get("category_key")) or category_key,
+                    current_page=int(progress.get("current_page") or 1),
+                    total_items_seen=int(progress.get("total_items_seen") or 0),
+                    last_item_id=compact_text(progress.get("last_item_id")) or None,
+                    message=compact_text(progress.get("message")) or "adapter crawl progress",
+                )
+
+            self._save_crawl_checkpoint(
+                platform=platform, batch_id=batch_id, mode=normalized_mode, status="running",
+                category_key=category_key, total_items_seen=checkpoint_seen,
+                last_item_id=last_processed_id, message="adapter crawl_with_db started",
+            )
+            try:
+                result = crawl_with_db(
+                    self.db,
+                    limit,
+                    normalized_mode,
+                    ai_mode=self.ai_mode,
+                    checkpoint_callback=adapter_checkpoint,
+                    resume_checkpoint=checkpoint if resume_enabled else None,
+                )
+                if not getattr(result, "batch_id", None):
+                    result.batch_id = batch_id
+                seen = max(checkpoint_seen, int(getattr(result, "success_count", 0) or 0))
+                self._save_crawl_checkpoint(
+                    platform=platform, batch_id=result.batch_id, mode=normalized_mode, status="completed",
+                    category_key=category_key, total_items_seen=seen,
+                    last_item_id=last_processed_id, message="adapter crawl_with_db completed",
+                )
+                return result
+            except Exception as exc:
+                result.errors.append({"item": "adapter", "error": str(exc)})
+                self._save_crawl_checkpoint(
+                    platform=platform, batch_id=batch_id, mode=normalized_mode, status="failed",
+                    category_key=category_key, total_items_seen=checkpoint_seen,
+                    last_item_id=last_processed_id, message=str(exc),
+                )
+                return result
+            finally:
+                close_handler = getattr(handler, "close", None)
+                if callable(close_handler):
+                    try:
+                        close_handler()
+                    except Exception:
+                        pass
+
         batch_id = self.db.start_batch(
             {
                 "source_platform": platform,
                 "source_site_name": getattr(handler, "source_site_name", platform),
                 "limit": limit,
-                "mode": mode,
+                "mode": normalized_mode,
                 "runner": "multi_platform_runner",
             }
         )
-        result = PlatformCrawlResult(platform=platform, batch_id=batch_id)
+        result.batch_id = batch_id
         full_list_for_fp: list[Any] = []
-        status = "failed"
+        list_items: list[Any] = []
+
         try:
-            if mode == "incremental":
-                # 增量模式: 加载断点, 仅采集新增/变更标的
-                checkpoint = None
-                if hasattr(self.db, "load_checkpoint"):
-                    try:
-                        checkpoint = self.db.load_checkpoint(source_platform=platform, category_key="default")
-                    except Exception:
-                        checkpoint = None
+            self._save_crawl_checkpoint(
+                platform=platform, batch_id=batch_id, mode=normalized_mode, status="running",
+                category_key=category_key, total_items_seen=checkpoint_seen,
+                last_item_id=last_processed_id,
+                message="crawl started" if not resume_enabled else "crawl resumed from checkpoint",
+            )
+
+            if normalized_mode == "incremental":
                 existing_ids = self._query_existing_ids(platform)
                 known_fps = self._query_list_fingerprints(platform)
                 has_baseline = bool(known_fps)
                 fp_method = getattr(handler, "list_fingerprint", None)
 
-                # 如果有断点且有指纹基线, 先增量快速扫描:
-                # 拉一批列表数据(100条), 如果全部是旧数据, 认为列表无更新
                 if checkpoint and has_baseline:
                     try:
                         quick_list = handler.fetch_list(100)
                         quick_new = [i for i in quick_list if _list_item_id(i) not in existing_ids]
                         if not quick_new and quick_list:
-                            # 100条都是旧数据 → 列表大概率无更新, 跳过
                             result.skipped_existing = len(quick_list)
                             result.list_total = 0
-                            full_list_for_fp = []
-                            list_items = []
                             result.scanned_count = 0
                             result.success_count = 0
-                            if hasattr(self.db, "save_checkpoint"):
-                                try:
-                                    self.db.save_checkpoint(
-                                        source_platform=platform, category_key="default",
-                                        total_items_seen=checkpoint.get("total_items_seen") or 0,
-                                    )
-                                except Exception:
-                                    pass
+                            status = "success"
+                            self._save_crawl_checkpoint(
+                                platform=platform, batch_id=batch_id, mode=normalized_mode, status="completed",
+                                category_key=category_key, total_items_seen=checkpoint_seen,
+                                last_item_id=last_processed_id,
+                                message="incremental quick scan found no new items",
+                            )
                             self.db.finish_batch(batch_id, "success", safe_json(result.__dict__))
                             return result
                     except Exception:
-                        pass  # 快速扫描失败, 退化为全量扫描
+                        pass
 
-                # 无断点或无基线 → 拉全量列表做完整比对
                 full_list = handler.fetch_list(0)
                 deduped: dict[str, Any] = {}
                 for item in full_list:
@@ -642,8 +794,8 @@ class MultiPlatformRunner:
                 result.list_total = len(full_list)
                 to_crawl: list[Any] = []
                 skipped = 0
-                INC_STOP_AFTER_CONSECUTIVE_OLD = 50
                 consecutive_old = 0
+                stop_after_consecutive_old = 50
                 for item in full_list_for_fp:
                     sid = _list_item_id(item)
                     if sid not in existing_ids:
@@ -656,33 +808,46 @@ class MultiPlatformRunner:
                         if known is not None and known == cur_fp:
                             skipped += 1
                             consecutive_old += 1
-                            if consecutive_old >= INC_STOP_AFTER_CONSECUTIVE_OLD:
+                            if consecutive_old >= stop_after_consecutive_old:
                                 break
                             continue
                         if known is None and not has_baseline:
                             skipped += 1
                             consecutive_old += 1
-                            if consecutive_old >= INC_STOP_AFTER_CONSECUTIVE_OLD:
+                            if consecutive_old >= stop_after_consecutive_old:
                                 break
                             continue
                     else:
                         skipped += 1
                         consecutive_old += 1
-                        if consecutive_old >= INC_STOP_AFTER_CONSECUTIVE_OLD:
+                        if consecutive_old >= stop_after_consecutive_old:
                             break
                         continue
                     to_crawl.append(item)
                     consecutive_old = 0
                 result.skipped_existing = skipped
-                list_items = to_crawl
+                list_items = _items_after_checkpoint(to_crawl, checkpoint) if resume_enabled else to_crawl
+                if resume_enabled:
+                    result.skipped_existing += checkpoint_seen
             else:
-                list_items = handler.fetch_list(0 if mode == "full" else limit)
+                list_items = handler.fetch_list(0 if normalized_mode == "full" else limit)
                 full_list_for_fp = list(list_items)
                 result.list_total = len(list_items)
+                if resume_enabled:
+                    list_items = _items_after_checkpoint(list_items, checkpoint)
+                    result.skipped_existing = checkpoint_seen
+
             result.scanned_count = len(list_items)
             if eff_concurrency <= 1 or len(list_items) <= 1:
                 for list_item in list_items:
                     self._crawl_list_item(handler, batch_id, list_item, result)
+                    processed_since_start += 1
+                    last_processed_id = _list_item_id(list_item) or last_processed_id
+                    self._save_crawl_checkpoint(
+                        platform=platform, batch_id=batch_id, mode=normalized_mode, status="running",
+                        category_key=category_key, total_items_seen=checkpoint_seen + processed_since_start,
+                        last_item_id=last_processed_id, message="crawl progress",
+                    )
             else:
                 with ThreadPoolExecutor(max_workers=min(eff_concurrency, len(list_items))) as executor:
                     futures = {
@@ -694,17 +859,22 @@ class MultiPlatformRunner:
                         try:
                             future.result()
                             result.success_count += 1
+                            processed_since_start += 1
+                            last_processed_id = _list_item_id(list_item) or last_processed_id
+                            self._save_crawl_checkpoint(
+                                platform=platform, batch_id=batch_id, mode=normalized_mode, status="running",
+                                category_key=category_key, total_items_seen=checkpoint_seen + processed_since_start,
+                                last_item_id=last_processed_id, message="crawl progress",
+                            )
                         except Exception as exc:
                             result.failed_count += 1
-                            result.errors.append(
-                                {
-                                    "item": compact_text(getattr(list_item, "source_item_id", "")) or compact_text(list_item),
-                                    "error": str(exc),
-                                }
-                            )
+                            result.errors.append({
+                                "item": compact_text(getattr(list_item, "source_item_id", "")) or compact_text(list_item),
+                                "error": str(exc),
+                            })
+
             status = "success" if result.failed_count == 0 else ("partial_success" if result.success_count else "failed")
-            # 回写列表指纹基线: 增量模式必回写; 全量/采样模式也回写(供后续增量直接跳过未变更项)
-            if full_list_for_fp and mode in ("incremental", "full", "sample"):
+            if full_list_for_fp and normalized_mode in ("incremental", "full", "sample"):
                 fp_method = getattr(handler, "list_fingerprint", None)
                 if callable(fp_method):
                     self._update_list_fingerprints(platform, full_list_for_fp, handler)
@@ -714,27 +884,25 @@ class MultiPlatformRunner:
             result.errors.append({"item": "list", "error": str(exc)})
             return result
         finally:
-            # 保存断点：不论正常结束还是异常中断，都记录已采集进度。
-            # 全量模式也保存而非清除，确保中断后能续采。
-            # 采集覆盖时 ON DUPLICATE KEY UPDATE 自动刷新已有断点。
-            if hasattr(self.db, "save_checkpoint"):
-                try:
-                    last_id = _list_item_id(full_list_for_fp[-1]) if full_list_for_fp else None
-                    self.db.save_checkpoint(
-                        source_platform=platform,
-                        category_key="default",
-                        total_items_seen=result.success_count,
-                        last_item_id=last_id,
-                    )
-                except Exception:
-                    pass
-            # 标记批次结束
+            checkpoint_status = "completed" if status in {"success", "partial_success"} else "failed"
+            self._save_crawl_checkpoint(
+                platform=platform, batch_id=batch_id, mode=normalized_mode, status=checkpoint_status,
+                category_key=category_key, total_items_seen=checkpoint_seen + processed_since_start,
+                last_item_id=last_processed_id,
+                message=safe_json(result.errors[:3]) if result.errors else "crawl completed",
+            )
             try:
                 self.db.finish_batch(batch_id, status, safe_json(result.__dict__))
             except Exception:
                 pass
+            close_handler = getattr(handler, "close", None)
+            if callable(close_handler):
+                try:
+                    close_handler()
+                except Exception:
+                    pass
 
-    # ── 增量采集辅助方法 ──
+    # 鈹鈹 澧為噺閲囬泦杈呭姪鏂规硶 鈹鈹
     def _query_existing_ids(self, platform: str) -> set[str]:
         q = getattr(self.db, "query_existing_source_item_ids", None)
         if callable(q):
@@ -786,7 +954,7 @@ class MultiPlatformRunner:
             record = handler.build_record(detail_bundle)
             if self.ai_enabled and self.ai_mode == "sync":
                 self._apply_ai(record, handler, detail_bundle)
-            # 写入(MySQL 死锁/锁等待时自动重试, 保证全量并发采集不丢数据)
+            # 鍐欏叆(MySQL 姝婚攣/閿佺瓑寰呮椂鑷姩閲嶈瘯, 淇濊瘉鍏ㄩ噺骞跺彂閲囬泦涓嶄涪鏁版嵁)
             self._write_record_with_retry(batch_id, record)
             if self.parse_attachments:
                 self._parse_item_attachments(record)
@@ -796,7 +964,7 @@ class MultiPlatformRunner:
                 result.success_count += 1
         except Exception as exc:
             err_msg = str(exc)
-            # 采集失败也写入标级队列, 供全量采集追溯与重跑
+            # 閲囬泦澶辫触涔熷啓鍏ユ爣绾ч槦鍒? 渚涘叏閲忛噰闆嗚拷婧笌閲嶈窇
             try:
                 self.db.write_crawl_queue_item(
                     batch_id=batch_id,
@@ -884,7 +1052,7 @@ class MultiPlatformRunner:
         )
 
     def _parse_item_attachments(self, record: PlatformRecord) -> None:
-        """下载并解析标的附件（提取文本内容存储到数据库）"""
+        """Download and parse item attachments into text resources."""
         try:
             import hashlib
             import tempfile
@@ -893,7 +1061,7 @@ class MultiPlatformRunner:
             if not attachments:
                 return
 
-            # 提取所有附件 URL
+            # 鎻愬彇鎵鏈夐檮浠?URL
             files: list[dict[str, Any]] = []
             if isinstance(attachments, dict):
                 files = attachments.get("files") or attachments.get("data") or []
@@ -906,24 +1074,24 @@ class MultiPlatformRunner:
             for attachment in files:
                 if not isinstance(attachment, dict):
                     continue
-                # 获取文件名和 URL
+                # 鑾峰彇鏂囦欢鍚嶅拰 URL
                 name = compact_text(attachment.get("attachmentName") or attachment.get("name") or attachment.get("fileName") or "")
                 url = compact_text(attachment.get("attachmentAddress") or attachment.get("url") or attachment.get("href") or attachment.get("downloadUrl") or "")
                 if not url:
                     continue
 
-                # 确定文件类型（跳过不需要解析的类型）
+                # 纭畾鏂囦欢绫诲瀷锛堣烦杩囦笉闇瑕佽В鏋愮殑绫诲瀷锛?
                 ext = ""
                 if name:
                     ext = os.path.splitext(name)[1].lower()
                 type_name = attachment.get("attachmentType") or attachment.get("type") or ""
 
-                # 只处理文本类附件
+                # 鍙鐞嗘枃鏈被闄勪欢
                 supported = ext in (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt", ".csv", ".htm", ".html", ".rtf")
                 if not supported and type_name not in ("pdf", "doc", "docx", "xls", "xlsx", "txt"):
                     continue
 
-                # 下载附件
+                # 涓嬭浇闄勪欢
                 try:
                     content = self._download_raw(url)
                     if not content:
@@ -933,7 +1101,7 @@ class MultiPlatformRunner:
                         url=url[:120], name=name, error=str(download_err))
                     continue
 
-                # 提取文本
+                # 鎻愬彇鏂囨湰
                 try:
                     text = self._extract_attachment_text(content, name)
                     if not text or len(text.strip()) < 10:
@@ -943,7 +1111,7 @@ class MultiPlatformRunner:
                         name=name, error=str(extract_err))
                     continue
 
-                # 存储为 item_resource
+                # 瀛樺偍涓?item_resource
                 text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
                 try:
                     raw_payload = {
@@ -961,7 +1129,7 @@ class MultiPlatformRunner:
                             payloads=[raw_payload],
                         )
                     else:
-                        # Fallback: 使用 DB 的通用方法
+                        # Fallback: 浣跨敤 DB 鐨勯氱敤鏂规硶
                         from jd_mysql_store import MySQLJDScraperDatabase
                         if isinstance(self.db, MySQLJDScraperDatabase):
                             self.db.raw_insert("item_resources", {
@@ -989,7 +1157,7 @@ class MultiPlatformRunner:
 
     @staticmethod
     def _download_raw(url: str) -> Optional[bytes]:
-        """下载附件原始内容"""
+        """Download raw attachment bytes."""
         import requests as _requests
         try:
             headers = {
@@ -1001,7 +1169,7 @@ class MultiPlatformRunner:
             content = b""
             for chunk in resp.iter_content(chunk_size=65536):
                 content += chunk
-                if len(content) > 50 * 1024 * 1024:  # 50MB 上限
+                if len(content) > 50 * 1024 * 1024:  # 50MB 涓婇檺
                     return None
             return content if content else None
         except Exception:
@@ -1009,13 +1177,13 @@ class MultiPlatformRunner:
 
     @staticmethod
     def _extract_attachment_text(content: bytes, filename: str) -> Optional[str]:
-        """从附件二进制内容提取文本"""
+        """Extract text from attachment bytes."""
         if not content:
             return None
         ext = os.path.splitext(filename or "unknown.txt")[1].lower()
         try:
             if ext == ".txt" or ext == ".csv" or ext == ".rtf":
-                # 尝试多种编码
+                # 灏濊瘯澶氱缂栫爜
                 for enc in ("utf-8", "gbk", "gb2312", "latin-1"):
                     try:
                         return content.decode(enc)
@@ -1025,7 +1193,7 @@ class MultiPlatformRunner:
 
             if ext == ".htm" or ext == ".html":
                 text = content.decode("utf-8", errors="replace")
-                # 简单去除 HTML 标签
+                # 绠鍗曞幓闄?HTML 鏍囩
                 import re as _re
                 text = _re.sub(r"<style[^>]*>.*?</style>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
                 text = _re.sub(r"<script[^>]*>.*?</script>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
@@ -1083,7 +1251,7 @@ class MultiPlatformRunner:
                 except ImportError:
                     pass
 
-            # 其他类型：尝试 UTF-8 解码
+            # 鍏朵粬绫诲瀷锛氬皾璇?UTF-8 瑙ｇ爜
             try:
                 text = content.decode("utf-8")
                 if len(text) > 10:
@@ -1103,7 +1271,7 @@ class MultiPlatformRunner:
         concurrency: int = 1,
         task_types: Optional[list[str]] = None,
     ) -> dict[str, Any]:
-        """消费 AI 补提取队列。concurrency>1 时多线程并发处理（AI 调用为网络 I/O 密集型，安全）。"""
+        """Consume AI enrichment queue tasks."""
         if not hasattr(self.db, "fetch_ai_enrichment_tasks"):
             raise AttributeError("db does not support ai enrichment queue")
         normalized_task_types = _parse_task_types_arg(task_types)
@@ -1147,10 +1315,10 @@ class MultiPlatformRunner:
                 if not ai_results:
                     raise RuntimeError("AI extractor unavailable or returned no enrichment result")
 
-                # ── Vision AI: 知识产权标的的图片表格 OCR 兜底 ──────────
-                # batch_extract 只做文本提取，不传图片给视觉模型。
-                # 当标的类型为知识产权(ip) 且上下文中有图片 URL 时，
-                # 额外调用视觉模型提取图片表格中的逐项明细。
+                # 鈹鈹 Vision AI: 鐭ヨ瘑浜ф潈鏍囩殑鐨勫浘鐗囪〃鏍?OCR 鍏滃簳 鈹鈹鈹鈹鈹鈹鈹鈹鈹鈹
+                # batch_extract 鍙仛鏂囨湰鎻愬彇锛屼笉浼犲浘鐗囩粰瑙嗚妯″瀷銆?
+                # 褰撴爣鐨勭被鍨嬩负鐭ヨ瘑浜ф潈(ip) 涓斾笂涓嬫枃涓湁鍥剧墖 URL 鏃讹紝
+                # 棰濆璋冪敤瑙嗚妯″瀷鎻愬彇鍥剧墖琛ㄦ牸涓殑閫愰」鏄庣粏銆?
                 if asset_group == "ip" and context.image_urls:
                     extractor = getattr(jd_v2, "ai_extractor", None)
                     vision_fn = getattr(extractor, "extract_ip_details_from_images", None)
@@ -1161,7 +1329,7 @@ class MultiPlatformRunner:
                                 ai_results["ip_details"] = image_result
                         except Exception:
                             logger.warning("async_vision_ip_failed",
-                                           "异步视觉 IP 提取失败",
+                                           "寮傛瑙嗚 IP 鎻愬彇澶辫触",
                                            paimai_id=source_item_id)
                 common_values, common_results, special_values, special_results = split_ai_results(ai_results, asset_group)
                 record = PlatformRecord(
@@ -1262,7 +1430,7 @@ class MultiPlatformRunner:
         ip_type = compact_text(values.get("ip_type") or values.get("specific_category")) or ""
         if not any((ip_name, certificate_no, ip_type)):
             return []
-        if re.search(r"\d+\s*项", ip_name) or re.search(r"\d+\s*项", certificate_no):
+        if re.search(r"\d+\s*(?:\u9879|\u4ef6)", ip_name) or re.search(r"\d+\s*(?:\u9879|\u4ef6)", certificate_no):
             return []
         excerpt_parts: list[str] = []
         for key in ("subject_name", "certificate_no", "ip_type", "specific_category"):
@@ -1278,12 +1446,12 @@ class MultiPlatformRunner:
                 "ip_type": ip_type or None,
                 "right_holder": compact_text(values.get("right_holder")) or None,
                 "right_status": compact_text(values.get("right_status")) or None,
-                "source_excerpt": "；".join(excerpt_parts[:4]) or None,
+                "source_excerpt": "; ".join(excerpt_parts[:4]) or None,
             }
         ]
 
     def _write_record_with_retry(self, batch_id: str, record: PlatformRecord, max_retries: int = 5) -> None:
-        """带死锁/锁等待重试的写入, 全量/增量并发采集时避免 MySQL 1213/1205 丢数据。"""
+        """Write a record with retry for transient MySQL lock errors."""
         import time as _time
         last_exc: Optional[Exception] = None
         for attempt in range(1, max_retries + 1):
@@ -1294,7 +1462,7 @@ class MultiPlatformRunner:
                 msg = str(exc)
                 if "1213" in msg or "1205" in msg or "Deadlock" in msg or "Lock wait timeout" in msg:
                     last_exc = exc
-                    # 指数退避(0.2s~2s)后重试, 降低并发写入冲突概率
+                    # 鎸囨暟閫閬?0.2s~2s)鍚庨噸璇? 闄嶄綆骞跺彂鍐欏叆鍐茬獊姒傜巼
                     _time.sleep(min(0.2 * (2 ** (attempt - 1)), 2.0))
                     continue
                 raise
@@ -1396,7 +1564,7 @@ class RequestsHTMLClient:
 
 class Ejy365LiveHandler:
     def list_fingerprint(self, item: Ejy365ListItem) -> str:
-        """列表级指纹: 用于增量采集判定"是否变更"。"""
+        """Build a stable list fingerprint for incremental change checks."""
         def _safe(v: Any) -> str:
             if v is None:
                 return ""
@@ -1414,7 +1582,7 @@ class Ejy365LiveHandler:
 
     source_platform = "ejy365"
     source_platform = "ejy365"
-    source_site_name = "e交易"
+    source_site_name = "e浜ゆ槗"
 
     def __init__(self, *, request_timeout: int | float | None = 0, project_types: Iterable[str] | None = None) -> None:
         self.adapter = Ejy365Adapter()
@@ -1422,7 +1590,7 @@ class Ejy365LiveHandler:
         self.project_types = tuple(project_types or DEFAULT_EJY365_PROJECT_TYPES)
 
     def fetch_list(self, limit: int) -> list[Ejy365ListItem]:
-        """limit=0 表示全量采集(翻完所有分页); 否则采样前 limit 条。"""
+        """Fetch list items. limit=0 means full crawl."""
         items: list[Ejy365ListItem] = []
         seen: set[str] = set()
         import time as _time
@@ -1430,7 +1598,7 @@ class Ejy365LiveHandler:
         max_pages = 200 if not limit else 5
         per_type_limit = (max(1, limit) + len(self.project_types) - 1) // max(1, len(self.project_types)) if limit else None
 
-        # 按类型逐一翻页，避免多种类型交叉造成大量请求
+        # 鎸夌被鍨嬮愪竴缈婚〉锛岄伩鍏嶅绉嶇被鍨嬩氦鍙夐犳垚澶ч噺璇锋眰
         for project_type in self.project_types:
             type_count = 0
             for page in range(1, max_pages + 1):
@@ -1440,10 +1608,10 @@ class Ejy365LiveHandler:
                 try:
                     html = self.client.get_text(url)
                 except Exception:
-                    break  # 此类型后续页失败，跳到下一种类型
+                    break  # 姝ょ被鍨嬪悗缁〉澶辫触锛岃烦鍒颁笅涓绉嶇被鍨?
                 page_items = self.adapter.parse_list_html(html, base_url=EJY365_BASE_URL)
                 if not page_items:
-                    break  # 空页，无更多数据
+                    break  # 绌洪〉锛屾棤鏇村鏁版嵁
                 added = 0
                 for item in page_items:
                     key = item.slug or item.detail_url
@@ -1459,7 +1627,7 @@ class Ejy365LiveHandler:
                     if per_type_limit and type_count >= per_type_limit:
                         break
                 if page > 1:
-                    _time.sleep(0.3)  # 页间短延迟防反爬
+                    _time.sleep(0.3)  # 椤甸棿鐭欢杩熼槻鍙嶇埇
                 if added == 0:
                     break
         return items
@@ -1467,7 +1635,7 @@ class Ejy365LiveHandler:
     def fetch_detail(self, list_item: Ejy365ListItem) -> Ejy365DetailBundle:
         html = self.client.get_text(list_item.detail_url)
         bundle = self.adapter.parse_detail_html(html, url=list_item.detail_url, list_item=list_item)
-        # 尝试通过 jmjl_detail API 获取竞买记录和补充信息
+        # 灏濊瘯閫氳繃 jmjl_detail API 鑾峰彇绔炰拱璁板綍鍜岃ˉ鍏呬俊鎭?
         if bundle.raw_payloads.get("detail_html"):
             infoid = self.adapter._extract_infoid(bundle.raw_payloads["detail_html"])
             if infoid:
@@ -1553,7 +1721,7 @@ class Ejy365LiveHandler:
 
 class CquaeLiveHandler:
     def list_fingerprint(self, item: CquaeListItem) -> str:
-        """列表级指纹: 用于增量采集判定"是否变更"。"""
+        """Build a stable list fingerprint for incremental change checks."""
         def _safe(v: Any) -> str:
             if v is None:
                 return ""
@@ -1571,7 +1739,7 @@ class CquaeLiveHandler:
 
     source_platform = CQUAE_PLATFORM
     source_platform = CQUAE_PLATFORM
-    source_site_name = "重庆产权交易网"
+    source_site_name = "???????"
 
     def __init__(
         self,
@@ -1580,15 +1748,22 @@ class CquaeLiveHandler:
         use_browser: bool = True,
         browser_headless: bool = True,
         browser_profile_path: Optional[str] = None,
+        page_size: int = 60,
+        max_pages: int = 0,
+        browser_timeout_ms: int = 0,
+        browser_settle_ms: int = 800,
     ) -> None:
         self.adapter = CquaeAdapter()
         self.client = RequestsHTMLClient(timeout=request_timeout)
         self.use_browser = use_browser
+        self.page_size = max(1, int(page_size or 60))
+        self.max_pages = max(0, int(max_pages or 0))
         self.browser = (
             CquaeBrowserFetcher(
                 headless=browser_headless,
-                timeout_ms=0,
+                timeout_ms=browser_timeout_ms,
                 profile_path=browser_profile_path,
+                settle_ms=browser_settle_ms,
             )
             if use_browser
             else None
@@ -1600,6 +1775,13 @@ class CquaeLiveHandler:
             if env_key.startswith("CQUAE_COOKIE_") and val:
                 cookie_name = env_key[len("CQUAE_COOKIE_"):]
                 self.client.session.cookies.set(cookie_name, val, domain=".cquae.com")
+
+    def close(self) -> None:
+        if self.browser:
+            try:
+                self.browser.close()
+            except Exception:
+                pass
 
     def _fetch_html(self, url: str) -> str:
         try:
@@ -1617,8 +1799,8 @@ class CquaeLiveHandler:
                 "CQUAE returned a WAF challenge after browser fallback; "
                 "try --cquae-headed with a trusted desktop browser session or switch to an official/API data source"
             )
-        # 浏览器成功渲染后，提取新鲜的 WAF cookies 注入 HTTP session，
-        # 后续请求直接用新 cookie 走 HTTP，无需再开浏览器。
+        # 娴忚鍣ㄦ垚鍔熸覆鏌撳悗锛屾彁鍙栨柊椴滅殑 WAF cookies 娉ㄥ叆 HTTP session锛?
+        # 鍚庣画璇锋眰鐩存帴鐢ㄦ柊 cookie 璧?HTTP锛屾棤闇鍐嶅紑娴忚鍣ㄣ?
         fresh = self.browser.last_waf_cookies
         if fresh:
             for name, value in fresh.items():
@@ -1633,26 +1815,26 @@ class CquaeLiveHandler:
         # multiple times with different source_item_id values.
         seen_title_price: set[tuple[str, str]] = set()
         first_error: Optional[Exception] = None
-        max_pages = 1000 if not limit else 20
+        max_pages = self.max_pages if self.max_pages > 0 else (1000 if not limit else 20)
 
-        # 采集两类目：产权转让(projectID=1)、资产转让(projectID=3)
-        # 产权转让需覆盖"正式披露"+"预披露"：nt=1/nt=8 均为正式披露态(部分重叠),
-        # nt=3 为预披露态(与正式 0 重叠)；三者遍历并按 source_item_id 去重。
+        # 閲囬泦涓ょ被鐩細浜ф潈杞(projectID=1)銆佽祫浜ц浆璁?projectID=3)
+        # 浜ф潈杞闇瑕嗙洊"姝ｅ紡鎶湶"+"棰勬姭闇?锛歯t=1/nt=8 鍧囦负姝ｅ紡鎶湶鎬?閮ㄥ垎閲嶅彔),
+        # nt=3 涓洪鎶湶鎬?涓庢寮?0 閲嶅彔)锛涗笁鑰呴亶鍘嗗苟鎸?source_item_id 鍘婚噸銆?
         category_configs = [
-            (1, 1, "产权转让-正式披露"),
-            (1, 8, "产权转让-正式披露"),
-            (1, 3, "产权转让-预披露"),
-            (3, None, "资产转让"),
+            (1, 1, "equity_transfer_official"),
+            (1, 8, "equity_transfer_official"),
+            (1, 3, "equity_transfer_preview"),
+            (3, None, "asset_transfer"),
         ]
 
         for project_id, nt_val, category_label in category_configs:
             nt = nt_val if nt_val is not None else 1
             try:
-                # 先尝试传统的 URL 翻页（对服务端分页有效）
-                url = self.adapter.build_list_url(page=1, page_size=15, project_id=project_id, nt=nt, price_id=32)
+                # 鍏堝皾璇曚紶缁熺殑 URL 缈婚〉锛堝鏈嶅姟绔垎椤垫湁鏁堬級
+                url = self.adapter.build_list_url(page=1, page_size=self.page_size, project_id=project_id, nt=nt, price_id=32)
                 html = self._fetch_html(url)
                 page_items = self.adapter.parse_list_html(html, base_url=CQUAE_BASE_URL)
-                print(f"[CQUAE] {category_label} (projectID={project_id},nt={nt_val}) 第1页返回 {len(page_items)} 条")
+                print(f"[CQUAE] {category_label} (projectID={project_id}, nt={nt_val}) page 1 returned {len(page_items)} items")
                 if page_items:
                     for item in page_items:
                         if item.source_item_id in seen:
@@ -1661,9 +1843,9 @@ class CquaeLiveHandler:
                         items.append(item)
                         if limit and len(items) >= limit:
                             return items
-                    # 尝试 URL 翻页（page=2,3,…）
+                    # 灏濊瘯 URL 缈婚〉锛坧age=2,3,鈥︼級
                     for page in range(2, max_pages + 1):
-                        url = self.adapter.build_list_url(page=page, page_size=15, project_id=project_id, nt=nt, price_id=32)
+                        url = self.adapter.build_list_url(page=page, page_size=self.page_size, project_id=project_id, nt=nt, price_id=32)
                         try:
                             html2 = self._fetch_html(url)
                         except Exception:
@@ -1671,7 +1853,7 @@ class CquaeLiveHandler:
                         page_items2 = self.adapter.parse_list_html(html2, base_url=CQUAE_BASE_URL)
                         if not page_items2:
                             break
-                        print(f"[CQUAE] {category_label} (projectID={project_id},nt={nt_val}) 第{page}页返回 {len(page_items2)} 条")
+                        print(f"[CQUAE] {category_label} (projectID={project_id}, nt={nt_val}) page {page} returned {len(page_items2)} items")
                         added = 0
                         for item in page_items2:
                             if item.source_item_id in seen:
@@ -1684,8 +1866,8 @@ class CquaeLiveHandler:
                         if added == 0:
                             break
                 else:
-                    # URL 翻页第一页就返回空 → 可能是 JS 分页，
-                    # 用 Playwright 渲染列表页，点击"下一页"翻页
+                    # URL 缈婚〉绗竴椤靛氨杩斿洖绌?鈫?鍙兘鏄?JS 鍒嗛〉锛?
+                    # 鐢?Playwright 娓叉煋鍒楄〃椤碉紝鐐瑰嚮"涓嬩竴椤?缈婚〉
                     if self.browser:
                         items = self._fetch_list_via_browser_click(
                             project_id, nt, category_label, items, seen, limit, max_pages
@@ -1695,7 +1877,7 @@ class CquaeLiveHandler:
                     first_error = exc
                 continue
         if items:
-            print(f"[CQUAE] 列表接口累计抓取 {len(items)} 条")
+            print(f"[CQUAE] fetched {len(items)} list items")
             return items
         if first_error:
             raise first_error
@@ -1711,16 +1893,27 @@ class CquaeLiveHandler:
         limit: int,
         max_pages: int,
     ) -> list[CquaeListItem]:
-        """使用 Playwright 渲染列表页，通过点击"下一页"来翻页"""
+        """Render list pages with Playwright and paginate."""
         from playwright.sync_api import sync_playwright
-        url = self.adapter.build_list_url(page=1, page_size=15, project_id=project_id, nt=nt, price_id=32)
+        url = self.adapter.build_list_url(page=1, page_size=self.page_size, project_id=project_id, nt=nt, price_id=32)
+        headless = bool(getattr(self.browser, "headless", True))
+        profile_path = getattr(self.browser, "profile_path", None)
+        timeout_ms = int(getattr(self.browser, "timeout_ms", 30000) or 0)
+        settle_ms = int(getattr(self.browser, "settle_ms", 800) or 0)
         with sync_playwright() as p:
-            ctx = p.chromium.launch(headless=True, channel="chrome")
+            ctx = (
+                p.chromium.launch_persistent_context(profile_path, headless=headless)
+                if profile_path
+                else p.chromium.launch(headless=headless, channel="chrome")
+            )
             page = ctx.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            import time
+            if timeout_ms <= 0:
+                page.set_default_timeout(0)
+                page.set_default_navigation_timeout(0)
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms or 0)
             for _ in range(max_pages):
-                time.sleep(2)
+                if settle_ms:
+                    page.wait_for_timeout(settle_ms)
                 html = page.content()
                 page_items = self.adapter.parse_list_html(html, base_url=CQUAE_BASE_URL)
                 if not page_items:
@@ -1737,13 +1930,13 @@ class CquaeLiveHandler:
                         return items
                 if added == 0:
                     break
-                # 尝试点击“下一页”
+                # 灏濊瘯鐐瑰嚮鈥滀笅涓椤碘?
                 try:
-                    next_btn = page.query_selector(".pagination .next, .pager .next, a.next, a:has-text('下一页')")
+                    next_btn = page.query_selector(".pagination .next, .pager .next, a.next, a:has-text('涓嬩竴椤?)")
                     if not next_btn:
                         next_btn = page.query_selector("a[rel=next]")
                     if not next_btn:
-                        # 通用：找最后一个非禁用分页链接
+                        # 閫氱敤锛氭壘鏈鍚庝竴涓潪绂佺敤鍒嗛〉閾炬帴
                         links = page.query_selector_all(".pagination a, .pager a, .page a")
                         current = page.query_selector(".pagination .active, .pager .active, .page .active")
                         if links and current:
@@ -1756,7 +1949,7 @@ class CquaeLiveHandler:
                                 next_btn = links[cur_idx + 1]
                     if next_btn and next_btn.is_enabled():
                         next_btn.click()
-                        page.wait_for_load_state("networkidle", timeout=10000)
+                        page.wait_for_load_state("domcontentloaded", timeout=timeout_ms or 10000)
                     else:
                         break
                 except Exception:
@@ -1791,7 +1984,7 @@ class CquaeLiveHandler:
             source_url=detail_bundle.source_url,
             asset_group=asset_group,
             category_id="cquae",
-            category_name=compact_text(common.get("asset_type")) or "产权交易",
+            category_name=compact_text(common.get("asset_type")) or "浜ф潈浜ゆ槗",
             common_values=common,
             field_results=field_results,
             special_values=special,
@@ -1806,7 +1999,7 @@ class CquaeLiveHandler:
 
 class SdcqjyLiveHandler:
     def list_fingerprint(self, item: CquaeListItem) -> str:
-        """列表级指纹: 用于增量采集判定"是否变更"。"""
+        """Build a stable list fingerprint for incremental change checks."""
         def _safe(v: Any) -> str:
             if v is None:
                 return ""
@@ -1834,16 +2027,16 @@ class SdcqjyLiveHandler:
         items: list[CquaeListItem] = []
         seen: set[str] = set()
 
-        # 先访问首页获取 session cookie
+        # 鍏堣闂椤佃幏鍙?session cookie
         try:
             self.client.get_text("http://www.sdcqjy.com/")
         except Exception:
             pass
 
-        # 仅采集三个分类：产权(cq)、资产(zc)、诉讼罚没(ssfm)
+        # 浠呴噰闆嗕笁涓垎绫伙細浜ф潈(cq)銆佽祫浜?zc)銆佽瘔璁肩綒娌?ssfm)
         type_ids = ["cq", "zc", "ssfm"]
         max_pages = 100 if not limit else 5
-        page_size = 15  # API 每页固定 15 条
+        page_size = 15  # API 姣忛〉鍥哄畾 15 鏉?
 
         for type_id in type_ids:
             for page in range(1, max_pages + 1):
@@ -1901,7 +2094,7 @@ class SdcqjyLiveHandler:
             source_url=detail_bundle.source_url,
             asset_group=asset_group,
             category_id=self.source_platform,
-            category_name=compact_text(common.get("asset_type")) or "山东产权交易",
+            category_name=compact_text(common.get("asset_type")) or "灞变笢浜ф潈浜ゆ槗",
             common_values=common,
             field_results=field_results,
             special_values=special,
@@ -1916,7 +2109,7 @@ class SdcqjyLiveHandler:
 
 class AliLiveHandler:
     def list_fingerprint(self, item: AliListItem) -> str:
-        """列表级指纹: 用于增量采集判定"是否变更"。"""
+        """Build a stable list fingerprint for incremental change checks."""
         def _safe(v: Any) -> str:
             if v is None:
                 return ""
@@ -1933,7 +2126,7 @@ class AliLiveHandler:
 
     source_platform = ALI_SOURCE_PLATFORM
     source_platform = ALI_SOURCE_PLATFORM
-    source_site_name = "阿里拍卖"
+    source_site_name = "闃块噷鎷嶅崠"
 
     def __init__(
         self,
@@ -1963,8 +2156,8 @@ class AliLiveHandler:
         if self.item_urls:
             return [self._list_item_from_url(url) for url in (self.item_urls[:limit] if limit else self.item_urls)]
 
-        # ── Path 1: Bootstrap MTOP session cookies via Playwright ──────────
-        # The taobao auction homepage is a DataFront SPA — it does NOT contain
+        # 鈹鈹 Path 1: Bootstrap MTOP session cookies via Playwright 鈹鈹鈹鈹鈹鈹鈹鈹鈹鈹
+        # The taobao auction homepage is a DataFront SPA 鈥?it does NOT contain
         # <a> tags pointing to individual auction items.  The only way to get a
         # listing is through the MTOP API, which requires the _m_h5_tk cookie
         # for signing.  We use Playwright + Chrome profile purely to obtain
@@ -2019,7 +2212,7 @@ class AliLiveHandler:
                     logger.error("ali_fetch_list path1 failed",
                                  traceback.format_exc())
 
-        # ── Path 2: MTOP API (may also work if warm-up got the cookie) ────
+        # 鈹鈹 Path 2: MTOP API (may also work if warm-up got the cookie) 鈹鈹鈹鈹
         try:
             items = self.adapter.fetch_mtop_list(
                 limit=limit,
@@ -2031,7 +2224,7 @@ class AliLiveHandler:
         except Exception:
             pass
 
-        # ── Path 3: Browser fallback (Playwright/Selenium) ────────────────
+        # 鈹鈹 Path 3: Browser fallback (Playwright/Selenium) 鈹鈹鈹鈹鈹鈹鈹鈹鈹鈹鈹鈹鈹鈹鈹鈹
         return self._fetch_list_with_browser(limit)
 
     def _list_item_from_url(self, url: str) -> AliListItem:
@@ -2213,7 +2406,7 @@ class AliLiveHandler:
 
 class TpreLiveHandler:
     def list_fingerprint(self, item: TpreListItem) -> str:
-        """列表级指纹: 用于增量采集判定"是否变更"。"""
+        """Build a stable list fingerprint for incremental change checks."""
         def _safe(v: Any) -> str:
             if v is None:
                 return ""
@@ -2240,7 +2433,7 @@ class TpreLiveHandler:
         items: list[TpreListItem] = []
         seen: set[str] = set()
 
-        # 多分类遍历：仅采正式披露（FORMAL，有交易价格）
+        # 澶氬垎绫婚亶鍘嗭細浠呴噰姝ｅ紡鎶湶锛團ORMAL锛屾湁浜ゆ槗浠锋牸锛?
         system_codes = list(TpreAdapter.TPRE_SYSTEM_CODES.keys())
         for system_code in system_codes:
             max_pages = 200 if not limit else 5
@@ -2285,7 +2478,7 @@ class TpreLiveHandler:
         special_results = special_results_from_values(asset_group_common, special, "detail_api", TPRE_PLATFORM)
         for key, fr in field_results.items():
             common_results.setdefault(key, fr)
-        asset_type = compact_text(common.get("asset_type")) or "产权转让"
+        asset_type = compact_text(common.get("asset_type")) or "浜ф潈杞"
         source_item_id = compact_text(detail_bundle.source_item_id)
         return PlatformRecord(
             source_platform=self.source_platform,
@@ -2322,7 +2515,7 @@ class PrechinaLiveHandler:
         return items[:limit] if limit else items
 
     def list_fingerprint(self, item: PrechinaListItem) -> str:
-        """列表级指纹: 用于增量采集判定"是否变更"。基于编号/标题/价格/日期/状态等列表字段。"""
+        """Build a stable list fingerprint for incremental change checks."""
         def _safe(v: Any) -> str:
             if v is None:
                 return ""
@@ -2361,7 +2554,7 @@ class PrechinaLiveHandler:
         special_results = special_results_from_values(asset_group_common, special, "detail_html", PRECHINA_PLATFORM)
         for key, fr in field_results.items():
             common_results.setdefault(key, fr)
-        asset_type = compact_text(common.get("asset_type")) or "产权转让"
+        asset_type = compact_text(common.get("asset_type")) or "浜ф潈杞"
         source_item_id = compact_text(detail_bundle.source_item_id)
         return PlatformRecord(
             source_platform=self.source_platform,
@@ -2385,7 +2578,7 @@ class PrechinaLiveHandler:
 
 class GxcqLiveHandler:
     def list_fingerprint(self, item: GxcqListItem) -> str:
-        """列表级指纹: 用于增量采集判定"是否变更"。"""
+        """Build a stable list fingerprint for incremental change checks."""
         def _safe(v: Any) -> str:
             if v is None:
                 return ""
@@ -2409,16 +2602,16 @@ class GxcqLiveHandler:
         self.client = RequestsHTMLClient(timeout=request_timeout)
 
     def fetch_list(self, limit: int) -> list[GxcqListItem]:
-        """limit=0 表示全量采集(翻完所有分页); 否则采样前 limit 条。"""
+        """Fetch list items. limit=0 means full crawl."""
         items: list[GxcqListItem] = []
         seen: set[str] = set()
         page_size = 10 if not limit else min(max(1, limit), 10)
 
-        max_pages = 1000  # 安全上限，防止死循环
+        max_pages = 1000  # 瀹夊叏涓婇檺锛岄槻姝㈡寰幆
 
         if not limit:
-            # 全量模式: 翻完所有分页
-            # 先请求第一页，获取总数
+            # 鍏ㄩ噺妯″紡: 缈诲畬鎵鏈夊垎椤?
+            # 鍏堣姹傜涓椤碉紝鑾峰彇鎬绘暟
             api_data = self.adapter.fetch_list_api(page=1, size=page_size)
             page_items = self.adapter.parse_list_response(api_data)
             total_count = self.adapter.parse_total_count(api_data)
@@ -2429,13 +2622,13 @@ class GxcqLiveHandler:
                 items.append(item)
 
             if total_count > 0:
-                # 已知总数，精确翻页
+                # 宸茬煡鎬绘暟锛岀簿纭炕椤?
                 total_pages = (total_count + page_size - 1) // page_size
                 print(f"[GXCQ] total_count={total_count}, page_size={page_size}, total_pages={total_pages}")
                 for page in range(2, total_pages + 1):
                     if len(items) >= max_pages * page_size:
                         break
-                    # 重试3次，间隔递增
+                    # 閲嶈瘯3娆★紝闂撮殧閫掑
                     for attempt in range(3):
                         try:
                             api_data = self.adapter.fetch_list_api(page=page, size=page_size)
@@ -2457,10 +2650,10 @@ class GxcqLiveHandler:
                                 time.sleep(wait)
                             else:
                                 print(f"[GXCQ] page={page} failed after 3 attempts: {e}")
-                                # 跳过这一页继续下一页
+                                # 璺宠繃杩欎竴椤电户缁笅涓椤?
                                 break
             else:
-                # 无法获取总数，逐页翻直到空页
+                # 鏃犳硶鑾峰彇鎬绘暟锛岄愰〉缈荤洿鍒扮┖椤?
                 print(f"[GXCQ] No total_count, falling back to max_pages={max_pages}")
                 for page in range(2, max_pages + 1):
                     try:
@@ -2481,7 +2674,7 @@ class GxcqLiveHandler:
                         break
             return items
 
-        # 采样模式: PHPCMF API
+        # 閲囨牱妯″紡: PHPCMF API
         for page in range(1, min(6, max_pages + 1)):
             api_data = self.adapter.fetch_list_api(page=page, size=page_size)
             page_items = self.adapter.parse_list_response(api_data)
@@ -2527,7 +2720,7 @@ class GxcqLiveHandler:
             source_url=detail_bundle.source_url,
             asset_group=asset_group_common,
             category_id=GXCQ_PLATFORM,
-            category_name=compact_text(common.get("asset_type")) or "产权转让",
+            category_name=compact_text(common.get("asset_type")) or "浜ф潈杞",
             common_values=common,
             field_results=common_results,
             special_values=special,
@@ -2541,11 +2734,11 @@ class GxcqLiveHandler:
 
 
 class GycqLiveHandler:
-    """贵州产权交易所 (GZCQ) handler — zz.prechina.net 资产交易 SPA (dscq-project 后端)
+    """Guizhou property exchange live handler."""
 
-    与 gxcq 同属 dscq-project 多租户系统, 但列表走 search/page, client-id=gycq。
-    增量采集: 复用 Runner 通用增量逻辑(按 source_item_id 去重 + 列表指纹), 故提供 list_fingerprint。
-    """
+
+
+
     source_platform = GYCQ_PLATFORM
     source_site_name = GYCQ_DATA_SOURCE
 
@@ -2554,10 +2747,10 @@ class GycqLiveHandler:
         self.client = RequestsHTMLClient(timeout=request_timeout)
 
     def fetch_list(self, limit: int) -> list[GxcqListItem]:
-        """limit=0 表示全量采集(翻完所有分页); 否则采样前 limit 条。
+        """Fetch list items. limit=0 means full crawl."""
 
-        search/page 服务端每页最多返回 30 条, 故以 30 为步长翻页至末页或无新增。
-        """
+
+
         items: list[GxcqListItem] = []
         seen: set[str] = set()
         page = 1
@@ -2575,7 +2768,7 @@ class GycqLiveHandler:
                 added += 1
                 if limit and len(items) >= limit:
                     return items
-            # 末页判定: 本页返回条数 < 30 或已无新增
+            # 鏈〉鍒ゅ畾: 鏈〉杩斿洖鏉℃暟 < 30 鎴栧凡鏃犳柊澧?
             payload = api_data.get("data") or {}
             if added == 0 or len(page_items) < 30:
                 break
@@ -2585,7 +2778,7 @@ class GycqLiveHandler:
         return items
 
     def list_fingerprint(self, item: GxcqListItem) -> str:
-        """列表级指纹: 用于增量采集判定"是否变更"。"""
+        """Build a stable list fingerprint for incremental change checks."""
         def _safe(v: Any) -> str:
             if v is None:
                 return ""
@@ -2630,7 +2823,7 @@ class GycqLiveHandler:
             source_url=detail_bundle.source_url,
             asset_group=asset_group_common,
             category_id=GYCQ_PLATFORM,
-            category_name=compact_text(common.get("asset_type")) or "产权转让",
+            category_name=compact_text(common.get("asset_type")) or "浜ф潈杞",
             common_values=common,
             field_results=common_results,
             special_values=special,
@@ -2645,7 +2838,7 @@ class GycqLiveHandler:
 
 class CbexLiveHandler:
     def list_fingerprint(self, item: CbexListItem) -> str:
-        """列表级指纹: 用于增量采集判定"是否变更"。"""
+        """Build a stable list fingerprint for incremental change checks."""
         def _safe(v: Any) -> str:
             if v is None:
                 return ""
@@ -2669,9 +2862,9 @@ class CbexLiveHandler:
         self.adapter = CbexAdapter()
         self.browser = CbexBrowserFetcher(headless=True, timeout_ms=60000, profile_path=browser_profile_path)
 
-    # ===== 列表/详情走浏览器上下文 (绕过 WAF, 单线程执行) =====
+    # ===== 鍒楄〃/璇︽儏璧版祻瑙堝櫒涓婁笅鏂?(缁曡繃 WAF, 鍗曠嚎绋嬫墽琛? =====
     def _fetch_category(self, biz: str, seen: set, items: list, limit: int) -> int:
-        """翻页抓取单个 businessType 类目, 返回接口报告的 totalRecordNum。"""
+        """Fetch one CBEX businessType category and return totalRecordNum."""
         page = 1
         total = 0
         max_pages = 2000
@@ -2701,33 +2894,33 @@ class CbexLiveHandler:
         return total
 
     def fetch_list(self, limit: int) -> list[CbexListItem]:
-        """通过 JSON 接口抓取全量类目 (旧代码只采了 ZQ 一个大类)。
+        """Fetch CBEX list items from JSON API categories."""
 
-        接口: /onss-api/jsonp/project/search
-        翻页: fromPage=N (服务端分页, 100% 可靠, 不再依赖浏览器点击)
-        类目: 遍历全部 businessType 代码; disclosureType 留空 = 全部披露态
-        注: 该接口与详情页都受创宇盾 WAF 保护, 故统一在浏览器上下文内 fetch,
-            且 CBEX 强制单线程 (见 crawl_platform) 以避免 Playwright 跨线程。
-        """
+
+
+
+
+
+
         items: list[CbexListItem] = []
         seen: set[str] = set()
-        # 全量 businessType 代码 (从网站 HTML 抠出, 含后续发现的 CAR 等)
-        # 末尾追加 "" 兜底: 接口在不指定 businessType 时会返回额外数据
-        # (如"项目推介"约 4700+ 条), 这些数据不归入上述任一标准类目
+        # 鍏ㄩ噺 businessType 浠ｇ爜 (浠庣綉绔?HTML 鎶犲嚭, 鍚悗缁彂鐜扮殑 CAR 绛?
+        # 鏈熬杩藉姞 "" 鍏滃簳: 鎺ュ彛鍦ㄤ笉鎸囧畾 businessType 鏃朵細杩斿洖棰濆鏁版嵁
+        # (濡?椤圭洰鎺ㄤ粙"绾?4700+ 鏉?, 杩欎簺鏁版嵁涓嶅綊鍏ヤ笂杩颁换涓鏍囧噯绫荤洰
         categories = ["ZQ", "ZL", "GZ", "JC", "ZS", "SSZC", "SW", "TJ", "CAR", ""]
         grand_total = 0
         for biz in categories:
             t = self._fetch_category(biz, seen, items, limit)
             if t:
                 grand_total += t
-                print(f"[CBEX] businessType={biz} 接口返回 {t} 条")
+                print(f"[CBEX] businessType={biz} api returned {t} records")
             if limit and len(items) >= limit:
                 break
-        print(f"[CBEX] 列表接口累计抓取 {len(items)} 条 (接口 totalRecordNum 合计 {grand_total})")
+        print(f"[CBEX] 鍒楄〃鎺ュ彛绱鎶撳彇 {len(items)} 鏉?(鎺ュ彛 totalRecordNum 鍚堣 {grand_total})")
         return items
 
     def fetch_detail(self, list_item: CbexListItem) -> CbexDetailBundle:
-        """详情页走 item['url'] 文章页 (旧 otc.cbex.com/xmjs/prj/detail 已失效, 返回空壳)。"""
+        """Fetch detail page HTML for one item URL."""
         html = self.browser.fetch_detail_html_by_url(list_item.detail_url)
         if not html:
             return self.adapter.parse_detail_html("", list_item.prj_id, list_item=list_item)
@@ -2758,7 +2951,7 @@ class CbexLiveHandler:
             source_url=detail_bundle.url,
             asset_group=asset_group_common,
             category_id=CBEX_PLATFORM,
-            category_name=compact_text(common.get("asset_type")) or "产权转让",
+            category_name=compact_text(common.get("asset_type")) or "浜ф潈杞",
             common_values=common,
             field_results=common_results,
             special_values=special,
@@ -2786,9 +2979,17 @@ class JdLiveHandler:
         self.output_dir = Path(output_dir)
         self.categories = categories
 
-    def crawl_with_db(self, db: Any, limit: int, mode: str = "sample", ai_mode: str = "async") -> PlatformCrawlResult:
+    def crawl_with_db(
+        self,
+        db: Any,
+        limit: int,
+        mode: str = "sample",
+        ai_mode: str = "async",
+        checkpoint_callback: Callable[..., None] | None = None,
+        resume_checkpoint: Mapping[str, Any] | None = None,
+    ) -> PlatformCrawlResult:
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        # 全量模式: 去掉总条数上限; 每类上限放大(京东当前仅取 page=1, 多页翻页属后续增强)
+        # 鍏ㄩ噺妯″紡: 鍘绘帀鎬绘潯鏁颁笂闄? 姣忕被涓婇檺鏀惧ぇ(浜笢褰撳墠浠呭彇 page=1, 澶氶〉缈婚〉灞炲悗缁寮?
         full_mode = mode == "full" or limit == 0
         summary = self.adapter.crawl_sample(
             db=db,
@@ -2798,6 +2999,8 @@ class JdLiveHandler:
             total_limit=None if full_mode else limit,
             mode=mode,
             ai_mode=ai_mode,
+            checkpoint_callback=checkpoint_callback,
+            resume_checkpoint=resume_checkpoint,
         )
         errors = summary.get("errors") or []
         scanned = int(summary.get("items_seen") or 0)
@@ -2832,6 +3035,10 @@ def build_handlers(args: argparse.Namespace) -> dict[str, PlatformHandler]:
             use_browser=not getattr(args, "no_browser", False),
             browser_headless=not getattr(args, "cquae_headed", False),
             browser_profile_path=getattr(args, "cquae_profile_path", None) or None,
+            page_size=getattr(args, "cquae_page_size", 60),
+            max_pages=getattr(args, "cquae_max_pages", 0),
+            browser_timeout_ms=getattr(args, "browser_timeout_ms", 0),
+            browser_settle_ms=getattr(args, "cquae_browser_settle_ms", 800),
         ),
         "sdcqjy": SdcqjyLiveHandler(request_timeout=getattr(args, "request_timeout", 30)),
         "ali": AliLiveHandler(
@@ -2854,7 +3061,7 @@ def build_handlers(args: argparse.Namespace) -> dict[str, PlatformHandler]:
 
 def _md_table(headers: list[str], rows: list[list[Any]]) -> str:
     if not rows:
-        return "_无数据_\n"
+        return "_鏃犳暟鎹甠\n"
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
@@ -2955,7 +3162,7 @@ def generate_model_quality_report(
         )
 
     platform_table = _md_table(
-        ["平台", "站点", "标的数", "缺最终价", "缺起拍价", "缺联系方式", "缺评估价"],
+        ["platform", "site", "item_count", "missing_final_price", "missing_start_price", "missing_contact", "missing_assessment"],
         [
             [
                 row.get("source_platform"),
@@ -2970,66 +3177,31 @@ def generate_model_quality_report(
         ],
     )
     resource_table = _md_table(
-        ["资源类型", "数量"],
+        ["璧勬簮绫诲瀷", "鏁伴噺"],
         [[row.get("resource_type"), row.get("count_rows")] for row in resource_rows],
     )
     no_attachment_table = _md_table(
-        ["平台", "无附件文件的标的数"],
+        ["platform", "items_without_attachment_files"],
         [[row.get("source_platform"), row.get("item_count")] for row in no_attachment_rows],
     )
     missing_field_table = _md_table(
-        ["命名空间", "字段", "中文名", "缺失/异常次数"],
+        ["namespace", "field_key", "field_label", "missing_or_abnormal_count"],
         [
             [row.get("field_namespace"), row.get("field_key"), row.get("field_label"), row.get("count_rows")]
             for row in missing_field_rows
         ],
     )
     ai_queue_table = _md_table(
-        ["状态", "数量"],
+        ["status", "count"],
         [[row.get("status"), row.get("count_rows")] for row in ai_queue_rows],
     )
     result_table = _md_table(
-        ["平台", "扫描", "成功", "失败", "错误数"],
+        ["platform", "scanned", "success", "failed", "error_count"],
         result_rows,
     )
 
-    report = f"""# 模型采集数据质量报告
-
-生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}
-
-## 本次采集结果
-
-{result_table}
-
-## 总览
-
-- 当前库内标的数：{total_items}
-- item_resources 空 URL 数：{empty_resource_urls}
-
-## 平台字段缺失
-
-{platform_table}
-
-## 资源入库情况
-
-{resource_table}
-
-## 无附件文件的标的
-
-说明：这里统计的是 `item_resources.resource_type='attachment'` 为空的标的；只有图片/视频不算附件文件。
-
-{no_attachment_table}
-
-## 字段缺失/异常 Top20
-
-{missing_field_table}
-
-## AI 异步队列
-
-{ai_queue_table}
-"""
     platform_table = _md_table(
-        ["平台", "站点", "标的数", "缺最终价", "缺起拍价", "缺联系方式", "缺评估价"],
+        ["platform", "site", "item_count", "missing_final_price", "missing_start_price", "missing_contact", "missing_assessment"],
         [
             [
                 row.get("source_platform"),
@@ -3044,59 +3216,61 @@ def generate_model_quality_report(
         ],
     )
     resource_table = _md_table(
-        ["资源类型", "数量"],
+        ["璧勬簮绫诲瀷", "鏁伴噺"],
         [[row.get("resource_type"), row.get("count_rows")] for row in resource_rows],
     )
     no_attachment_table = _md_table(
-        ["平台", "无附件文件的标的数"],
+        ["platform", "items_without_attachment_files"],
         [[row.get("source_platform"), row.get("item_count")] for row in no_attachment_rows],
     )
     missing_field_table = _md_table(
-        ["命名空间", "字段", "中文名", "缺失/异常次数"],
+        ["namespace", "field_key", "field_label", "missing_or_abnormal_count"],
         [
             [row.get("field_namespace"), row.get("field_key"), row.get("field_label"), row.get("count_rows")]
             for row in missing_field_rows
         ],
     )
     ai_queue_table = _md_table(
-        ["状态", "数量"],
+        ["status", "count"],
         [[row.get("status"), row.get("count_rows")] for row in ai_queue_rows],
     )
     result_table = _md_table(
-        ["平台", "扫描", "成功", "失败", "错误数"],
+        ["platform", "scanned", "success", "failed", "error_count"],
         result_rows,
     )
-    report = f"""# 模型采集数据质量报告
+    generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    report = f"""# Model Crawl Data Quality Report
 
-生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}
+Generated at: {generated_at}
 
-## 本次采集结果
+## Current Run Results
 
 {result_table}
 
-## 总览
+## Summary
 
-- 当前库内标的数：{total_items}
-- item_resources 空 URL 数：{empty_resource_urls}
+- Total items in database: {total_items}
+- item_resources empty URL count: {empty_resource_urls}
 
-## 平台字段缺失
+## Missing Fields By Platform
 
 {platform_table}
 
-## 资源入库情况
+## Resource Storage
 
 {resource_table}
 
-## 无附件文件的标的
+## Items Without Attachment Files
 
-说明：这里统计的是 `item_resources.resource_type='attachment'` 为空的标的；只有图片/视频不算附件文件。
+This counts items with no `item_resources.resource_type='attachment'` rows. Images/videos alone are not counted as attachment files.
+
 {no_attachment_table}
 
-## 字段缺失/异常 Top20
+## Missing/Abnormal Fields Top 20
 
 {missing_field_table}
 
-## AI 异步队列
+## AI Queue
 
 {ai_queue_table}
 """
@@ -3111,8 +3285,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     crawl.add_argument("--platform", choices=["jd", "ejy365", "cquae", "sdcqjy", "ali", "tpre", "prechina", "gxcq", "gycq", "cbex", "all"], default="all")
     crawl.add_argument("--limit", type=int, default=10)
     crawl.add_argument("--mode", choices=["sample", "full", "incremental"], default="sample",
-                       help="sample: 采样前 N 条(默认); full: 翻完所有分页做全量采集; "
-                            "incremental: 仅采集新增/列表变更的标的(基于已入库ID与列表指纹)")
+                       help="sample: 閲囨牱鍓?N 鏉?榛樿); full: 缈诲畬鎵鏈夊垎椤靛仛鍏ㄩ噺閲囬泦; "
+                            "incremental: 浠呴噰闆嗘柊澧?鍒楄〃鍙樻洿鐨勬爣鐨?鍩轰簬宸插叆搴揑D涓庡垪琛ㄦ寚绾?")
     crawl.add_argument("--output-dir", type=Path, default=Path("outputs") / "multi_platform", help="export/output directory")
     crawl.add_argument("--reset-db", action="store_true", help="drop and recreate MySQL V2 tables before crawling")
     crawl.add_argument("--confirm-reset-db", action="store_true", help="required with --reset-db to confirm destructive table drops")
@@ -3128,6 +3302,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     crawl.add_argument("--no-browser", action="store_true", help="disable browser fallback for WAF pages")
     crawl.add_argument("--cquae-headed", action="store_true", help="run CQUAE browser fallback in visible headed mode")
     crawl.add_argument("--cquae-profile-path", default="", help="browser user-data-dir for CQUAE WAF fallback")
+    crawl.add_argument("--cquae-page-size", type=int, default=60, help="CQUAE list page size; larger values reduce list requests when accepted")
+    crawl.add_argument("--cquae-max-pages", type=int, default=0, help="max CQUAE list pages per category; 0 uses mode default")
+    crawl.add_argument("--cquae-browser-settle-ms", type=int, default=800, help="CQUAE browser fallback wait after DOM load")
     crawl.add_argument("--no-ai", action="store_true", help="disable AI enrichment")
     crawl.add_argument("--parse-attachments", action="store_true", help="download and extract text from attachments during crawl")
     crawl.add_argument(
@@ -3148,7 +3325,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     crawl.add_argument("--ali-tk-token", default="",
         help="_m_h5_tk cookie value for MTOP API signing (portable: no Chrome profile needed)")
     crawl.add_argument("--jd-categories", default="", help="JD category ids, comma-separated; only used when --platform jd")
-    crawl.add_argument("--ejy365-types", default="", help="E交易 project types, comma-separated, e.g. ZQ,GQ,TD; empty=all 36 types")
+    crawl.add_argument("--ejy365-types", default="", help="E浜ゆ槗 project types, comma-separated, e.g. ZQ,GQ,TD; empty=all 36 types")
 
     enrich = sub.add_parser("ai-enrich", help="process queued AI enrichment tasks")
     enrich.add_argument("--limit", type=int, default=20)
@@ -3206,6 +3383,8 @@ def main(argv: list[str] | None = None) -> int:
         print("--reset-db is destructive; add --confirm-reset-db to confirm table reset.")
         return 2
     if args.reset_db:
+        from jd_mysql_store import require_db_reset_allowed
+        require_db_reset_allowed()
         reset_mysql_tables(config)
     db.init_schema()
     db.seed_field_catalog()
@@ -3256,7 +3435,7 @@ def main(argv: list[str] | None = None) -> int:
     report_path = generate_model_quality_report(config, output_dir=args.output_dir, run_results=results)
     payload = {"results": results, "quality_report": str(report_path)}
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-    # 退出码: 无采集失败即视为成功(增量模式下"全部跳过"也属正常成功)
+    # 閫鍑虹爜: 鏃犻噰闆嗗け璐ュ嵆瑙嗕负鎴愬姛(澧為噺妯″紡涓?鍏ㄩ儴璺宠繃"涔熷睘姝ｅ父鎴愬姛)
     return 0 if all(result.get("failed_count", 0) == 0 for result in results) else 1
 
 

@@ -3,6 +3,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -39,6 +40,16 @@ from jd_scraper_v2 import (
     safe_json_dumps,
     typed_field_extraction_values,
 )
+
+
+def db_reset_allowed(env: Mapping[str, str] | None = None) -> bool:
+    source = env if env is not None else os.environ
+    return str(source.get("ALLOW_DB_RESET", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def require_db_reset_allowed(env: Mapping[str, str] | None = None) -> None:
+    if not db_reset_allowed(env):
+        raise SystemExit("数据库重置需要额外设置环境变量 ALLOW_DB_RESET=1")
 
 
 @dataclass(frozen=True)
@@ -133,6 +144,23 @@ def ensure_ai_enrichment_queue_columns(cur) -> None:
             "running_profile_name": "VARCHAR(100) NULL COMMENT '实际处理AI配置名'",
             "running_provider": "VARCHAR(80) NULL COMMENT '实际处理AI供应商'",
             "running_model_name": "VARCHAR(200) NULL COMMENT '实际处理AI模型'",
+        },
+    )
+
+
+def ensure_crawl_checkpoint_columns(cur) -> None:
+    """Keep existing crawl_checkpoints tables compatible with resumable crawls."""
+    if not mysql_table_exists(cur, "crawl_checkpoints"):
+        return
+    ensure_mysql_columns(
+        cur,
+        "crawl_checkpoints",
+        {
+            "batch_id": "VARCHAR(64) NULL COMMENT '关联采集批次ID'",
+            "crawl_mode": "VARCHAR(20) NOT NULL DEFAULT 'full' COMMENT '采集模式: full/incremental/sample'",
+            "checkpoint_status": "VARCHAR(20) NOT NULL DEFAULT 'running' COMMENT '断点状态: running/completed/failed'",
+            "message": "TEXT NULL COMMENT '断点说明或失败原因'",
+            "completed_at": "DATETIME NULL COMMENT '采集完成时间'",
         },
     )
 
@@ -846,6 +874,7 @@ def ensure_mysql_schema(config: MySQLConfig) -> None:
                 cur.execute(statement)
             ensure_ai_model_profile_columns(cur)
             ensure_ai_enrichment_queue_columns(cur)
+            ensure_crawl_checkpoint_columns(cur)
         conn.commit()
 
 
@@ -1328,22 +1357,44 @@ class MySQLJDScraperDatabase:
 
     def save_checkpoint(self, *, source_platform: str, category_key: str = "default",
                         current_page: int = 1, total_items_seen: int = 0,
-                        last_item_id: Optional[str] = None) -> None:
+                        last_item_id: Optional[str] = None,
+                        batch_id: Optional[str] = None,
+                        crawl_mode: str = "full",
+                        checkpoint_status: str = "running",
+                        message: Optional[str] = None,
+                        completed_at: Optional[str] = None) -> None:
         """保存采集断点"""
         with mysql_connection(self.config) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO crawl_checkpoints
-                        (source_platform, category_key, current_page, total_items_seen, last_item_id, started_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                        (source_platform, category_key, current_page, total_items_seen, last_item_id,
+                         batch_id, crawl_mode, checkpoint_status, message, completed_at, started_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                     ON DUPLICATE KEY UPDATE
                         current_page = VALUES(current_page),
                         total_items_seen = VALUES(total_items_seen),
                         last_item_id = COALESCE(VALUES(last_item_id), last_item_id),
+                        batch_id = COALESCE(VALUES(batch_id), batch_id),
+                        crawl_mode = VALUES(crawl_mode),
+                        checkpoint_status = VALUES(checkpoint_status),
+                        message = VALUES(message),
+                        completed_at = VALUES(completed_at),
                         updated_at = NOW()
                     """,
-                    (source_platform, category_key, current_page, total_items_seen, last_item_id),
+                    (
+                        source_platform,
+                        category_key,
+                        current_page,
+                        total_items_seen,
+                        last_item_id,
+                        batch_id,
+                        crawl_mode,
+                        checkpoint_status,
+                        message,
+                        completed_at,
+                    ),
                 )
             conn.commit()
 
@@ -1358,6 +1409,8 @@ class MySQLJDScraperDatabase:
                 row = cur.fetchone()
                 if not row:
                     return None
+                if isinstance(row, dict):
+                    return row
                 cols = [d[0] for d in cur.description]
                 return dict(zip(cols, row))
 
@@ -2475,6 +2528,7 @@ def main() -> None:
     if args.reset:
         if not args.confirm_reset:
             raise SystemExit("--reset 会删除并重建 V2 MySQL 表，请同时传入 --confirm-reset")
+        require_db_reset_allowed()
         reset_mysql_tables(config)
         action = "reset"
     else:

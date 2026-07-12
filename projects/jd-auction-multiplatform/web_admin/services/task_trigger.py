@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from ..config import WebConfig
@@ -189,11 +190,18 @@ def trigger_crawl(
     item_concurrency: int = 1,
     ai_profile: str = "",
     run_id: Optional[int] = None,
+    request_timeout: int | float | None = None,
+    browser_timeout_ms: int | None = None,
+    cquae_page_size: int | None = None,
+    cquae_max_pages: int | None = None,
+    cquae_browser_settle_ms: int | None = None,
+    cquae_profile_path: str = "",
 ) -> str:
     """Trigger a crawler subprocess and return task_id."""
     platform = platform or "jd"
     mode = mode if mode in ("sample", "full", "incremental") else "incremental"
     ai_mode = ai_mode if ai_mode in ("sync", "async", "off") else "async"
+    effective_limit = 0 if mode == "full" else int(limit or 0)
     task_id = f"crawl_{platform}_{int(time.time() * 1000)}"
     cmd = [
         sys.executable,
@@ -202,7 +210,7 @@ def trigger_crawl(
         "--platform",
         platform,
         "--limit",
-        str(limit),
+        str(effective_limit),
         "--mode",
         mode,
         "--platform-concurrency",
@@ -218,12 +226,28 @@ def trigger_crawl(
         cmd.append("--parse-attachments")
     if ai_profile:
         cmd.extend(["--ai-profile", ai_profile])
+    if platform == "cquae":
+        profile_path = cquae_profile_path or str(Path(config.project_root) / ".browser" / "cquae")
+        cmd.extend([
+            "--request-timeout",
+            str(0 if request_timeout is None else request_timeout),
+            "--browser-timeout-ms",
+            str(0 if browser_timeout_ms is None else browser_timeout_ms),
+            "--cquae-page-size",
+            str(60 if cquae_page_size is None else cquae_page_size),
+            "--cquae-max-pages",
+            str(0 if cquae_max_pages is None else cquae_max_pages),
+            "--cquae-browser-settle-ms",
+            str(800 if cquae_browser_settle_ms is None else cquae_browser_settle_ms),
+            "--cquae-profile-path",
+            profile_path,
+        ])
 
     with _lock:
         _running_tasks[task_id] = {
             "type": "crawl",
             "platform": platform,
-            "limit": limit,
+            "limit": effective_limit,
             "category": category,
             "mode": mode,
             "page_limit": page_limit,

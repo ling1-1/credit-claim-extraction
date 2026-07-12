@@ -1,5 +1,9 @@
 # Credit Claim Image Extraction Pipeline
 
+## 子项目
+
+- `projects/jd-auction-multiplatform/`：多平台拍卖/资产项目信息采集系统，主线为 MySQL + 定时任务 Web 后台 + AI 异步补提取。详见 [projects/jd-auction-multiplatform/README.md](projects/jd-auction-multiplatform/README.md)。
+
 用于将中文债权公告图片清洗抽取为结构化 CSV，并可写入 MySQL staging 暂存表。
 
 ## 能力

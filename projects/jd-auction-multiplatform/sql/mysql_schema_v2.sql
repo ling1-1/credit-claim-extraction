@@ -665,7 +665,14 @@ CREATE TABLE IF NOT EXISTS crawl_checkpoints (
   current_page INT NOT NULL DEFAULT 1 COMMENT '当前页码',
   total_items_seen INT NOT NULL DEFAULT 0 COMMENT '已处理标的数',
   last_item_id VARCHAR(200) NULL COMMENT '最后处理的标的ID',
+  batch_id VARCHAR(100) NULL COMMENT '批次ID',
+  crawl_mode VARCHAR(30) NOT NULL DEFAULT 'full' COMMENT '采集模式',
+  checkpoint_status VARCHAR(30) NOT NULL DEFAULT 'running' COMMENT '断点状态',
+  message TEXT NULL COMMENT '断点说明或错误信息',
   started_at DATETIME NULL COMMENT '首次开始时间',
+  completed_at DATETIME NULL COMMENT '完成时间',
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-  UNIQUE KEY uk_platform_category (source_platform, category_key)
+  UNIQUE KEY uk_platform_category (source_platform, category_key),
+  KEY idx_status (checkpoint_status),
+  KEY idx_updated_at (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='采集断点表(支撑断点续传)';

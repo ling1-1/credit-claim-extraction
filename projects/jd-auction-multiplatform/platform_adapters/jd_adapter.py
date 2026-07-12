@@ -1,6 +1,6 @@
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from jd_scraper_v2 import JDCategory, JDClient, JDAuctionScraper
 
@@ -54,6 +54,8 @@ class JDPlatformAdapter:
         total_limit: int | None = None,
         mode: str = "sample",
         ai_mode: str = "async",
+        checkpoint_callback: Callable[..., None] | None = None,
+        resume_checkpoint: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         scraper = self.create_scraper(db)
         return scraper.crawl_sample(
@@ -63,6 +65,8 @@ class JDPlatformAdapter:
             total_limit=total_limit,
             mode=mode,
             ai_mode=ai_mode,
+            checkpoint_callback=checkpoint_callback,
+            resume_checkpoint=resume_checkpoint,
         )
 
 

@@ -13,6 +13,9 @@ from multi_platform_runner import (
     MultiPlatformRunner,
     PlatformRecord,
     SdcqjyLiveHandler,
+    _items_after_checkpoint,
+    _list_item_id,
+    _should_resume_from_checkpoint,
     build_handlers,
     ejy365_asset_for_project_type,
     normalize_attachments_payload,
@@ -58,6 +61,19 @@ class FakeDB:
 
     def enqueue_ai_enrichment_task(self, **kwargs):
         self.ai_enrichment_calls.append(kwargs)
+
+
+class CheckpointDB(FakeDB):
+    def __init__(self, checkpoint=None):
+        super().__init__()
+        self.checkpoint = checkpoint
+        self.saved_checkpoints = []
+
+    def save_checkpoint(self, **kwargs):
+        self.saved_checkpoints.append(kwargs)
+
+    def load_checkpoint(self, **kwargs):
+        return self.checkpoint
 
 
 class FakeHandler:
@@ -110,6 +126,21 @@ class FakeHandler:
         )
 
 
+class FullOkHandler(FakeHandler):
+    def fetch_list(self, limit):
+        items = [
+            {"source_item_id": "ok-1", "url": "https://fake.test/items/ok-1"},
+            {"source_item_id": "ok-2", "url": "https://fake.test/items/ok-2"},
+            {"source_item_id": "ok-3", "url": "https://fake.test/items/ok-3"},
+        ]
+        return items if limit == 0 else items[:limit]
+
+    def fetch_detail(self, list_item):
+        source_item_id = _list_item_id(list_item)
+        self.detail_calls.append(source_item_id)
+        return {"id": source_item_id, "url": list_item["url"], "html": "<html>detail</html>"}
+
+
 class FakeAIExtractor:
     def is_available(self):
         return True
@@ -147,6 +178,43 @@ class FakeAIHandler(FakeHandler):
 
 
 class MultiPlatformRunnerTests(unittest.TestCase):
+    def test_list_item_id_supports_dict_items(self):
+        self.assertEqual(_list_item_id({"source_item_id": "a"}), "a")
+        self.assertEqual(_list_item_id({"id": "b"}), "b")
+        self.assertEqual(_list_item_id({"detail_url": "https://example.test/item"}), "https://example.test/item")
+
+    def test_items_after_checkpoint_skips_processed_items(self):
+        items = [
+            SimpleNamespace(source_item_id="a"),
+            SimpleNamespace(source_item_id="b"),
+            SimpleNamespace(source_item_id="c"),
+        ]
+        checkpoint = {"last_item_id": "b", "checkpoint_status": "running"}
+
+        self.assertEqual(_items_after_checkpoint(items, checkpoint), [items[2]])
+
+    def test_items_after_checkpoint_keeps_items_when_checkpoint_not_found(self):
+        items = [
+            SimpleNamespace(source_item_id="a"),
+            SimpleNamespace(source_item_id="b"),
+        ]
+        checkpoint = {"last_item_id": "missing", "checkpoint_status": "running"}
+
+        self.assertEqual(_items_after_checkpoint(items, checkpoint), items)
+
+    def test_should_resume_from_running_checkpoint_for_full_and_incremental(self):
+        checkpoint = {"last_item_id": "b", "checkpoint_status": "running"}
+
+        self.assertTrue(_should_resume_from_checkpoint("full", checkpoint))
+        self.assertTrue(_should_resume_from_checkpoint("incremental", checkpoint))
+
+    def test_should_not_resume_sample_or_completed_checkpoint(self):
+        running = {"last_item_id": "b", "checkpoint_status": "running"}
+        completed = {"last_item_id": "b", "checkpoint_status": "completed"}
+
+        self.assertFalse(_should_resume_from_checkpoint("sample", running))
+        self.assertFalse(_should_resume_from_checkpoint("full", completed))
+
     def test_jd_live_handler_passes_limit_as_total_limit(self):
         class FakeJDAdapter:
             def __init__(self):
@@ -213,6 +281,86 @@ class MultiPlatformRunnerTests(unittest.TestCase):
         self.assertEqual(db.common_calls[0]["paimai_id"], "ok-1")
         self.assertEqual(db.common_calls[0]["values"]["source_platform"], "fake")
         self.assertEqual(db.finished[0][1], "partial_success")
+
+    def test_full_mode_writes_running_and_completed_checkpoints(self):
+        db = CheckpointDB()
+        handler = FullOkHandler()
+        runner = MultiPlatformRunner(db=db, handlers={"fake": handler}, ai_enabled=False, item_concurrency=1)
+
+        result = runner.crawl_platform("fake", limit=0, mode="full")
+
+        self.assertEqual(result.success_count, 3)
+        self.assertGreaterEqual(len(db.saved_checkpoints), 2)
+        self.assertEqual(db.saved_checkpoints[0]["checkpoint_status"], "running")
+        self.assertEqual(db.saved_checkpoints[-1]["checkpoint_status"], "completed")
+        self.assertEqual(db.saved_checkpoints[-1]["last_item_id"], "ok-3")
+        self.assertEqual(db.saved_checkpoints[-1]["total_items_seen"], 3)
+
+    def test_full_mode_resumes_after_last_checkpoint_item(self):
+        db = CheckpointDB({"last_item_id": "ok-1", "checkpoint_status": "running", "total_items_seen": 1})
+        handler = FullOkHandler()
+        runner = MultiPlatformRunner(db=db, handlers={"fake": handler}, ai_enabled=False, item_concurrency=1)
+
+        result = runner.crawl_platform("fake", limit=0, mode="full")
+
+        self.assertEqual(handler.detail_calls, ["ok-2", "ok-3"])
+        self.assertEqual(result.success_count, 2)
+        self.assertEqual(result.skipped_existing, 1)
+        self.assertEqual(db.saved_checkpoints[-1]["last_item_id"], "ok-3")
+        self.assertEqual(db.saved_checkpoints[-1]["total_items_seen"], 3)
+
+    def test_jd_crawl_with_db_adapter_can_write_fine_grained_checkpoint(self):
+        class FakeJDAdapter:
+            def crawl_sample(self, **kwargs):
+                callback = kwargs.get("checkpoint_callback")
+                if callback:
+                    callback(
+                        current_page=3,
+                        total_items_seen=7,
+                        last_item_id="jd-7",
+                        message="jd crawl progress",
+                    )
+                return {"batch_id": "batch-jd", "items_seen": 7, "errors": []}
+
+        handler = JdLiveHandler.__new__(JdLiveHandler)
+        handler.adapter = FakeJDAdapter()
+        handler.output_dir = Path("outputs") / "test_jd_checkpoint"
+        handler.categories = None
+        db = CheckpointDB()
+        runner = MultiPlatformRunner(db=db, handlers={"jd": handler}, ai_enabled=False, item_concurrency=1)
+
+        result = runner.crawl_platform("jd", limit=0, mode="full")
+
+        self.assertEqual(result.success_count, 7)
+        progress = [
+            row for row in db.saved_checkpoints
+            if row.get("message") == "jd crawl progress"
+        ]
+        self.assertEqual(progress[-1]["last_item_id"], "jd-7")
+        self.assertEqual(progress[-1]["total_items_seen"], 7)
+        self.assertEqual(progress[-1]["current_page"], 3)
+
+    def test_jd_crawl_with_db_receives_running_checkpoint_for_resume(self):
+        class FakeJDAdapter:
+            def __init__(self):
+                self.kwargs = None
+
+            def crawl_sample(self, **kwargs):
+                self.kwargs = kwargs
+                return {"batch_id": "batch-jd", "items_seen": 2, "errors": []}
+
+        adapter = FakeJDAdapter()
+        handler = JdLiveHandler.__new__(JdLiveHandler)
+        handler.adapter = adapter
+        handler.output_dir = Path("outputs") / "test_jd_resume"
+        handler.categories = None
+        db = CheckpointDB({"last_item_id": "jd-7", "checkpoint_status": "running", "total_items_seen": 7})
+        runner = MultiPlatformRunner(db=db, handlers={"jd": handler}, ai_enabled=False, item_concurrency=1)
+
+        runner.crawl_platform("jd", limit=0, mode="full")
+
+        self.assertEqual(adapter.kwargs["resume_checkpoint"]["last_item_id"], "jd-7")
+        self.assertEqual(adapter.kwargs["resume_checkpoint"]["total_items_seen"], 7)
 
     def test_cquae_browser_fallback_reports_persistent_waf(self):
         class FakeClient:

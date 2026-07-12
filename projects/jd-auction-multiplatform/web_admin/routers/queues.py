@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from ..config import WebConfig
 from ..database import execute, query_all, query_one
 from ..services import ai_queue_auto
-from ..services.task_trigger import get_running_tasks, trigger_ai_enrich
+from ..services.task_trigger import get_running_tasks, trigger_ai_enrich, trigger_crawl
 
 router = APIRouter(prefix="/api/queues", tags=["队列管理"])
 
@@ -30,6 +30,19 @@ def _stats(keys: list[str], error: str = "") -> dict[str, Any]:
     if error:
         payload["error"] = error
     return payload
+
+
+def _table_exists(table_name: str) -> bool:
+    row = query_one(
+        _config,
+        """
+        SELECT COUNT(*) AS cnt
+        FROM information_schema.tables
+        WHERE table_schema = DATABASE() AND table_name = %s
+        """,
+        (table_name,),
+    ) or {}
+    return int(row.get("cnt") or 0) > 0
 
 
 def _resolve_ai_profile_policy(ai_profile: str, concurrency: int) -> tuple[str, int]:
@@ -364,6 +377,56 @@ def retry_failed_ai_tasks(item_id: str = "", status: str = "failed", platform: s
         return {"updated": 0, "error": str(exc)}
 
 
+@router.post("/ai/process-selected")
+def process_selected_ai_tasks(payload: dict[str, Any]) -> dict[str, Any]:
+    """Prioritize selected AI queue rows and start a worker for them."""
+    task_ids = [
+        str(item).strip()
+        for item in (payload.get("task_ids") or [])
+        if str(item).strip()
+    ]
+    if not task_ids:
+        raise HTTPException(400, "请先选择要处理的任务")
+
+    profile_name, effective_concurrency = _resolve_ai_profile_policy(
+        str(payload.get("ai_profile") or ""),
+        int(payload.get("concurrency") or 1),
+    )
+    placeholders = ", ".join(["%s"] * len(task_ids))
+    affected = execute(
+        _config,
+        f"""
+        UPDATE ai_enrichment_queue
+        SET queue_status='pending',
+            priority=0,
+            retry_count=0,
+            locked_by=NULL,
+            locked_at=NULL,
+            running_profile_name=NULL,
+            running_provider=NULL,
+            running_model_name=NULL,
+            last_error=NULL,
+            updated_at=NOW()
+        WHERE ai_task_id IN ({placeholders})
+        """,
+        task_ids,
+    )
+    task_id = trigger_ai_enrich(
+        _config,
+        limit=len(task_ids),
+        worker_id="web-selected-worker",
+        concurrency=effective_concurrency,
+        ai_profile=profile_name,
+    )
+    return {
+        "updated": affected,
+        "task_id": task_id,
+        "selected": len(task_ids),
+        "ai_profile": profile_name,
+        "concurrency": effective_concurrency,
+    }
+
+
 @router.post("/ai/unlock-stale")
 def unlock_stale_ai_tasks(minutes: int = 5) -> dict[str, Any]:
     try:
@@ -665,8 +728,9 @@ def crawl_checkpoints() -> dict[str, Any]:
         rows = query_all(
             _config,
             """
-            SELECT source_platform, category_key, current_page, total_items_seen,
-                   last_item_id, started_at, updated_at
+            SELECT checkpoint_id, source_platform, category_key, current_page,
+                   total_items_seen, last_item_id, batch_id, crawl_mode,
+                   checkpoint_status, message, started_at, completed_at, updated_at
             FROM crawl_checkpoints
             ORDER BY updated_at DESC
             """,
@@ -674,3 +738,56 @@ def crawl_checkpoints() -> dict[str, Any]:
         return {"items": rows or []}
     except Exception as exc:
         return {"items": [], "error": str(exc)}
+
+
+@router.post("/crawl/checkpoints/resume")
+def resume_crawl_checkpoint(source_platform: str, category_key: str = "default") -> dict[str, Any]:
+    """Trigger a crawl using the platform/mode stored in a running checkpoint."""
+    checkpoint = query_one(
+        _config,
+        """
+        SELECT source_platform, category_key, current_page, total_items_seen,
+               last_item_id, batch_id, crawl_mode, checkpoint_status, message
+        FROM crawl_checkpoints
+        WHERE source_platform = %s AND category_key = %s
+        """,
+        (source_platform, category_key or "default"),
+    )
+    if not checkpoint:
+        raise HTTPException(404, "未找到该平台的采集断点")
+
+    platform = str(checkpoint.get("source_platform") or source_platform or "").strip()
+    running = [
+        task for task in get_running_tasks()
+        if task.get("platform") == platform and task.get("status") in ("running", "pending")
+    ]
+    if running:
+        task_ids = ", ".join(str(task.get("task_id")) for task in running)
+        raise HTTPException(409, f"平台 {platform} 已有采集任务正在运行: {task_ids}")
+
+    mode = str(checkpoint.get("crawl_mode") or "full").strip() or "full"
+    category = ""
+    if platform == "jd" and category_key and category_key != "default":
+        category = category_key
+    task_id = trigger_crawl(
+        _config,
+        platform=platform,
+        limit=0,
+        category=category,
+        mode=mode,
+        ai_mode="async",
+        platform_concurrency=1,
+        item_concurrency=1,
+    )
+    warning = ""
+    if not checkpoint.get("last_item_id"):
+        warning = "该断点没有最后标的ID，当前平台可能只能重新扫描后依赖去重。"
+    return {
+        "task_id": task_id,
+        "source_platform": platform,
+        "category_key": category_key or "default",
+        "crawl_mode": mode,
+        "last_item_id": checkpoint.get("last_item_id"),
+        "total_items_seen": checkpoint.get("total_items_seen") or 0,
+        "warning": warning,
+    }

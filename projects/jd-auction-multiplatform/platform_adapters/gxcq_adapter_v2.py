@@ -8,7 +8,7 @@
 已验证的 API 端点（2026-06-27 抓包验证）:
 
   列表 API (www.gxcq.com.cn, PHPCMF httpapi):
-    GET /index.php?s=httpapi&id=3&appid=1&appsecret=PHPCMFA0EF8F01A56FF
+    GET /index.php?s=httpapi&id=3&appid=1&appsecret=<GXCQ_LIST_APP_SECRET>
         &data[assetsTypeParent]={type}&data[cate_id]={cid}
     返回: {code: 1, data: {project_html: "<li>...<li>..."}}
     HTML格式: <li><a href="{detail_url}"><h1>{title}</h1>
@@ -45,7 +45,7 @@ GXCQ_DATA_SOURCE = "广西联合产权交易所集团有限责任公司"
 # 列表 API 配置 (已验证: id=2=搜索API, 支持分页并返回 project_total; id=3=列表HTML, 不支持分页)
 GXCQ_LIST_API_PATH = "/index.php"
 GXCQ_LIST_APP_ID = "1"
-GXCQ_LIST_APP_SECRET = os.getenv("GXCQ_LIST_APP_SECRET", "PHPCMFA0EF8F01A56FF")  # PHPCMF appsecret
+GXCQ_LIST_APP_SECRET = os.getenv("GXCQ_LIST_APP_SECRET", "")  # PHPCMF appsecret
 GXCQ_LIST_API_ID = "2"  # 2=搜索API(支持分页); 3=项目列表HTML(不支持分页)
 
 # assetsTypeParent 映射
@@ -323,12 +323,13 @@ class GxcqBrowserFetcher:
             "s": "httpapi",
             "id": GXCQ_LIST_API_ID,
             "appid": GXCQ_LIST_APP_ID,
-            "appsecret": GXCQ_LIST_APP_SECRET,
             "data[assetsTypeParent]": assets_type_parent or "ZQ",
             "data[cate_id]": str(cate_id),
             "data[page]": str(page),
             "data[pagesize]": str(size),
         }
+        if GXCQ_LIST_APP_SECRET:
+            params["appsecret"] = GXCQ_LIST_APP_SECRET
         query = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{self.base_url}{GXCQ_LIST_API_PATH}?{query}"
 

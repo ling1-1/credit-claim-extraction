@@ -39,6 +39,13 @@ class WebConfig:
     ai_queue_auto_limit: int = 50
     ai_queue_auto_profile: str = ""
 
+    # Optional admin authentication. Keep disabled for current localhost-only use.
+    auth_enabled: bool = False
+    admin_username: str = "admin"
+    admin_password: str = ""
+    auth_session_ttl_seconds: int = 86400
+    auth_cookie_secure: bool = False
+
     def __post_init__(self) -> None:
         if not self.project_root:
             self.project_root = str(Path(__file__).resolve().parent.parent)
@@ -50,8 +57,9 @@ class WebConfig:
             "ai_queue_auto_concurrency",
             "ai_queue_auto_interval",
             "ai_queue_auto_limit",
+            "auth_session_ttl_seconds",
         }
-        bool_keys = {"debug", "mysql_use_reader", "ai_queue_auto_enabled"}
+        bool_keys = {"debug", "mysql_use_reader", "ai_queue_auto_enabled", "auth_enabled", "auth_cookie_secure"}
         env_keys = (
             "host",
             "port",
@@ -70,6 +78,11 @@ class WebConfig:
             "ai_queue_auto_interval",
             "ai_queue_auto_limit",
             "ai_queue_auto_profile",
+            "auth_enabled",
+            "admin_username",
+            "admin_password",
+            "auth_session_ttl_seconds",
+            "auth_cookie_secure",
         )
         for key in env_keys:
             env_val = os.environ.get(f"WEB_ADMIN_{key.upper()}")

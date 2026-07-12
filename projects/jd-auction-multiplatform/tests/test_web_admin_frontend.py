@@ -95,6 +95,33 @@ class WebAdminFrontendTests(unittest.TestCase):
         self.assertIn("fieldRows(data.value?.special || {})", html)
         self.assertIn(":label=\"col.label\"", html)
 
+    def test_item_detail_renders_bid_records_as_table(self):
+        html = Path("web_admin/static/index.html").read_text(encoding="utf-8")
+
+        self.assertIn("bidRecords", html)
+        self.assertIn("formatBidTime", html)
+        self.assertIn("出价记录", html)
+        self.assertIn("出价时间", html)
+        self.assertIn("出价人", html)
+        self.assertNotIn("[[{'price'", html)
+
+    def test_item_detail_special_image_fields_are_previewable(self):
+        html = Path("web_admin/static/index.html").read_text(encoding="utf-8")
+
+        self.assertIn("specialImageUrls", html)
+        self.assertIn("normalizeFieldImageUrl", html)
+        self.assertIn("img30.360buyimg.com/popWaterMark", html)
+        self.assertIn("openFieldImagePreview", html)
+        self.assertIn("field-preview-image", html)
+        self.assertIn("@click=\"openFieldImagePreview", html)
+
+    def test_item_detail_source_url_is_not_rendered_with_v_html(self):
+        html = Path("web_admin/static/index.html").read_text(encoding="utf-8")
+
+        self.assertNotIn("v-html", html)
+        self.assertIn("safeSourceUrl", html)
+        self.assertIn(':href="safeSourceUrl(row[1])"', html)
+
     def test_queue_page_shows_last_error(self):
         html = Path("web_admin/static/index.html").read_text(encoding="utf-8")
 
@@ -113,3 +140,18 @@ class WebAdminFrontendTests(unittest.TestCase):
         self.assertIn("已暂停", html)
         self.assertIn("modelText(row)", html)
         self.assertIn("running_profile_name", html)
+
+    def test_frontend_has_auth_gate_for_future_remote_access(self):
+        html = Path("web_admin/static/index.html").read_text(encoding="utf-8")
+
+        self.assertIn("/api/auth/status", html)
+        self.assertIn("/api/auth/login", html)
+        self.assertIn("auth.enabled && !auth.authenticated", html)
+
+    def test_login_page_has_polished_admin_layout(self):
+        html = Path("web_admin/static/index.html").read_text(encoding="utf-8")
+
+        self.assertIn("login-shell", html)
+        self.assertIn("login-visual", html)
+        self.assertIn("login-card", html)
+        self.assertIn("login-badge", html)

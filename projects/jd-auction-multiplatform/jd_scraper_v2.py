@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -4734,6 +4734,8 @@ class JDAuctionScraper:
         total_limit: Optional[int] = None,
         mode: str = "sample",
         ai_mode: str = "async",
+        checkpoint_callback: Callable[..., None] | None = None,
+        resume_checkpoint: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """采集样本数据"""
         self.db.init_schema()
@@ -4761,6 +4763,16 @@ class JDAuctionScraper:
             existing_ids = set(query_existing("jd") or []) if callable(query_existing) else set()
             known_fps = dict(query_fps("jd") or {}) if callable(query_fps) else {}
         has_baseline = bool(known_fps)
+        resume_last_item_id = ""
+        resume_found = True
+        resume_seen = 0
+        if mode in ("full", "incremental") and resume_checkpoint:
+            resume_last_item_id = compact_text(resume_checkpoint.get("last_item_id"))
+            resume_found = not bool(resume_last_item_id)
+            try:
+                resume_seen = max(0, int(resume_checkpoint.get("total_items_seen") or 0))
+            except Exception:
+                resume_seen = 0
         try:
             for category in self.client.get_categories():
                 if total_limit is not None and len(seen) >= total_limit:
@@ -4787,12 +4799,25 @@ class JDAuctionScraper:
                         break
                     if page >= 5 and page_items and len(page_items) < per_category_limit:
                         break
+                    if checkpoint_callback:
+                        checkpoint_callback(
+                            batch_id=batch_id,
+                            category_key="default",
+                            current_page=page,
+                            total_items_seen=resume_seen + len(seen),
+                            last_item_id=None,
+                            message=f"jd list page fetched: {category.name} page {page}",
+                        )
                 items = cat_items
                 for list_item in items[:per_category_limit]:
                     if total_limit is not None and len(seen) >= total_limit:
                         break
                     paimai_id = compact_text(first_non_blank(list_item.get("id"), list_item.get("paimaiId")))
                     if not paimai_id or paimai_id in seen:
+                        continue
+                    if not resume_found:
+                        if paimai_id == resume_last_item_id:
+                            resume_found = True
                         continue
                     seen.add(paimai_id)
                     list_fp = self._list_fingerprint(list_item)
@@ -4828,6 +4853,15 @@ class JDAuctionScraper:
                             continue
                     try:
                         self._crawl_one(batch_id, category, list_item, paimai_id, ai_mode=ai_mode)
+                        if checkpoint_callback:
+                            checkpoint_callback(
+                                batch_id=batch_id,
+                                category_key="default",
+                                current_page=page,
+                                total_items_seen=resume_seen + len(seen),
+                                last_item_id=paimai_id,
+                                message=f"jd item crawled: {category.name}",
+                            )
                     except Exception as exc:  # noqa: BLE001 - 单条失败不影响整个批次
                         logger.error(
                             "item_crawl_failed",
@@ -5104,7 +5138,7 @@ def main() -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         categories = {part.strip() for part in args.categories.split(",") if part.strip()} or None
         storage_info: Dict[str, Any]
-        from jd_mysql_store import MySQLConfig, MySQLJDScraperDatabase, reset_mysql_tables
+        from jd_mysql_store import MySQLConfig, MySQLJDScraperDatabase, require_db_reset_allowed, reset_mysql_tables
 
         mysql_config = MySQLConfig(
             host=args.mysql_host,
@@ -5116,6 +5150,7 @@ def main() -> None:
         if args.reset_db and not args.confirm_reset_db:
             raise SystemExit("--reset-db 会删除并重建 MySQL 表，请同时添加 --confirm-reset-db 确认")
         if args.reset_db:
+            require_db_reset_allowed()
             reset_mysql_tables(mysql_config)
         db = MySQLJDScraperDatabase(mysql_config)
         storage_info = {

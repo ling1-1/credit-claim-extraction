@@ -1,11 +1,16 @@
 .venv/
+.pytest_cache/
 outputs/
 outputs*/
 image/
 run_logs/
 __pycache__/
 *.pyc
+*.log
+*.out.log
+*.err.log
 .env
+.browser/
 *.jpg
 *.jpeg
 *.png

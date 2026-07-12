@@ -2668,10 +2668,12 @@ class CquaeBrowserFetcher:
         headless: bool = True,
         timeout_ms: int = 0,
         profile_path: Optional[str] = None,
+        settle_ms: int = 800,
     ) -> None:
         self.headless = headless
         self.timeout_ms = timeout_ms
         self.profile_path = profile_path
+        self.settle_ms = max(0, int(settle_ms or 0))
         # Reusable browser resources
         self._playwright: Any = None
         self._browser: Any = None
@@ -2774,8 +2776,12 @@ class CquaeBrowserFetcher:
                 page.set_default_timeout(0)
                 page.set_default_navigation_timeout(0)
             page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms or 0)
-            import time
-            time.sleep(3)
+            try:
+                page.wait_for_selector("body", timeout=3000)
+            except Exception:
+                pass
+            if self.settle_ms:
+                page.wait_for_timeout(self.settle_ms)
             html = page.content()
             # 渲染成功后提取 WAF cookies，供 _fetch_html 的调用方注入 session
             self._save_browser_cookies(ctx)

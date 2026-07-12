@@ -3,6 +3,7 @@ from typing import Optional
 
 import argparse
 import logging
+import os
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,11 +14,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .config import WebConfig
+from . import auth
 from .routers import dashboard, jobs, batches, items, platforms, queues, reports, scheduler, tasks, models
 from .services import scheduler_service as _sched_svc
 from .services import ai_queue_auto as _ai_auto
 
 logger = logging.getLogger(__name__)
+
+
+def _cors_allow_origins() -> list[str]:
+    raw = os.environ.get(
+        "WEB_ADMIN_CORS_ALLOW_ORIGINS",
+        "http://127.0.0.1:8000,http://localhost:8000",
+    )
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
 @asynccontextmanager
@@ -51,14 +61,15 @@ app = FastAPI(
     lifespan=_lifespan,
 )
 
-# CORS（开发环境允许前端跨域）
+# CORS：默认只允许本机管理端，外部前端需通过 WEB_ADMIN_CORS_ALLOW_ORIGINS 显式配置。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.middleware("http")(auth.require_auth_middleware)
 
 # 全局配置实例
 _config: Optional[WebConfig] = None
@@ -66,6 +77,7 @@ _config: Optional[WebConfig] = None
 
 def _register_routes(config: WebConfig) -> None:
     """注册所有 API 路由"""
+    auth.init(config)
     dashboard.init(config)
     jobs.init(config)
     batches.init(config)
@@ -75,6 +87,7 @@ def _register_routes(config: WebConfig) -> None:
     reports.init(config)
     scheduler.init(config)
     models.init(config)
+    app.include_router(auth.router)
     app.include_router(dashboard.router)
     app.include_router(jobs.router)
     app.include_router(batches.router)
@@ -105,7 +118,7 @@ def _setup_static() -> None:
             # API 请求返回 JSON 而非 HTML
             if request.url.path.startswith("/api/"):
                 return JSONResponse(
-                    {"error": f"API endpoint not found: {request.url.path}", "detail": str(exc)},
+                    {"error": f"API endpoint not found: {request.url.path}"},
                     status_code=404,
                 )
             html_path = static_dir / "index.html"
@@ -118,7 +131,7 @@ def _setup_static() -> None:
             logger.error(f"未处理的异常 {request.url.path}: {exc}", exc_info=True)
             if request.url.path.startswith("/api/"):
                 return JSONResponse(
-                    {"error": "Internal Server Error", "detail": str(exc)},
+                    {"error": "Internal Server Error"},
                     status_code=500,
                 )
             html_path = static_dir / "index.html"
@@ -143,6 +156,7 @@ def create_app(config: Optional[WebConfig] = None) -> FastAPI:
     global _config
     if config is not None:
         _config = config
+        auth.init(config)
         dashboard.init(config)
         jobs.init(config)
         batches.init(config)
@@ -164,6 +178,9 @@ def main():
     parser.add_argument("--mysql-user", default="root", help="MySQL 用户")
     parser.add_argument("--mysql-password", default="root", help="MySQL 密码")
     parser.add_argument("--mysql-database", default="auction_data", help="MySQL 数据库名")
+    parser.add_argument("--auth-enabled", action="store_true", help="启用 Web 管理后台登录保护")
+    parser.add_argument("--admin-username", default="admin", help="Web 管理后台管理员用户名")
+    parser.add_argument("--admin-password", default="", help="Web 管理后台管理员密码；开放局域网/公网前必须设置")
     parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     parser.add_argument("--reload", action="store_true", help="自动重载（开发模式）")
     args = parser.parse_args()
@@ -176,6 +193,9 @@ def main():
         mysql_user=args.mysql_user,
         mysql_password=args.mysql_password,
         mysql_database=args.mysql_database,
+        auth_enabled=args.auth_enabled,
+        admin_username=args.admin_username,
+        admin_password=args.admin_password,
     )
 
     create_app(config)

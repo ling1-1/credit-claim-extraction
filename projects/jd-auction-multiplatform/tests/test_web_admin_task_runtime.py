@@ -61,6 +61,50 @@ class WebAdminTaskRuntimeTests(unittest.TestCase):
         self.assertIn("--ai-mode", cmd)
         self.assertIn("async", cmd)
 
+    def test_trigger_crawl_cquae_full_uses_latest_browser_defaults(self):
+        threads = []
+
+        class FakeThread:
+            def __init__(self, target, args=(), kwargs=None, daemon=None):
+                self.target = target
+                self.args = args
+                self.kwargs = kwargs or {}
+                self.daemon = daemon
+                threads.append(self)
+
+            def start(self):
+                return None
+
+        config = WebConfig(project_root="F:\\codex_project\\jd", task_timeout=30)
+        with patch.object(task_trigger.threading, "Thread", FakeThread):
+            task_trigger.trigger_crawl(
+                config,
+                platform="cquae",
+                limit=10,
+                mode="full",
+                ai_mode="async",
+                item_concurrency=1,
+            )
+
+        cmd = threads[0].args[1]
+        self.assertIn("--platform", cmd)
+        self.assertIn("cquae", cmd)
+        self.assertIn("--mode", cmd)
+        self.assertIn("full", cmd)
+        self.assertIn("--limit", cmd)
+        self.assertEqual(cmd[cmd.index("--limit") + 1], "0")
+        expected = {
+            "--request-timeout": "0",
+            "--browser-timeout-ms": "0",
+            "--cquae-page-size": "60",
+            "--cquae-max-pages": "0",
+            "--cquae-browser-settle-ms": "800",
+            "--cquae-profile-path": "F:\\codex_project\\jd\\.browser\\cquae",
+        }
+        for flag, value in expected.items():
+            self.assertIn(flag, cmd)
+            self.assertEqual(cmd[cmd.index(flag) + 1], value)
+
     def test_run_async_updates_crawl_job_run_when_subprocess_finishes(self):
         config = WebConfig(project_root="F:\\codex_project\\jd", task_timeout=30)
         calls = []
@@ -270,6 +314,67 @@ class WebAdminTaskRuntimeTests(unittest.TestCase):
         self.assertNotIn(">处理 20 条<", text)
         self.assertIn("启动 AI 解析", text)
         self.assertIn("重复点击会启动新的后台 worker", text)
+
+    def test_resume_crawl_checkpoint_triggers_platform_from_checkpoint(self):
+        queues.init(WebConfig(project_root="F:\\codex_project\\jd"))
+        checkpoint = {
+            "source_platform": "jd",
+            "category_key": "default",
+            "crawl_mode": "full",
+            "checkpoint_status": "running",
+            "total_items_seen": 7,
+            "last_item_id": "jd-7",
+        }
+        calls = []
+
+        def fake_query_one(_config, sql, params=None):
+            return checkpoint
+
+        def fake_trigger(_config, **kwargs):
+            calls.append(kwargs)
+            return "crawl_jd_resume"
+
+        with patch.object(queues, "query_one", fake_query_one):
+            with patch.object(queues, "get_running_tasks", lambda: []):
+                with patch.object(queues, "trigger_crawl", fake_trigger):
+                    result = queues.resume_crawl_checkpoint(source_platform="jd")
+
+        self.assertEqual(result["task_id"], "crawl_jd_resume")
+        self.assertEqual(result["source_platform"], "jd")
+        self.assertEqual(result["last_item_id"], "jd-7")
+        self.assertEqual(calls[0]["platform"], "jd")
+        self.assertEqual(calls[0]["mode"], "full")
+        self.assertEqual(calls[0]["limit"], 0)
+        self.assertEqual(calls[0]["ai_mode"], "async")
+
+    def test_process_selected_ai_tasks_resets_selected_rows_and_triggers_worker(self):
+        queues.init(WebConfig(project_root="F:\\codex_project\\jd"))
+        execute_calls = []
+        trigger_calls = []
+
+        def fake_execute(_config, sql, params=None):
+            execute_calls.append((sql, params))
+            return 2
+
+        def fake_trigger(_config, **kwargs):
+            trigger_calls.append(kwargs)
+            return "ai_selected"
+
+        with patch.object(queues, "execute", fake_execute):
+            with patch.object(queues, "query_one", return_value=None):
+                with patch.object(queues, "trigger_ai_enrich", fake_trigger):
+                    result = queues.process_selected_ai_tasks(
+                        payload={"task_ids": ["a1", "a2"], "ai_profile": "", "concurrency": 3}
+                    )
+
+        self.assertEqual(result["updated"], 2)
+        self.assertEqual(result["task_id"], "ai_selected")
+        sql, params = execute_calls[0]
+        self.assertIn("ai_task_id IN (%s, %s)", sql)
+        self.assertEqual(params, ["a1", "a2"])
+        self.assertEqual(trigger_calls[0]["limit"], 2)
+        self.assertEqual(trigger_calls[0]["concurrency"], 3)
+        self.assertEqual(trigger_calls[0]["ai_profile"], "")
 
     def test_process_ai_queue_selected_profile_uses_single_profile_task_types(self):
         queues.init(WebConfig(project_root="F:\\codex_project\\jd"))

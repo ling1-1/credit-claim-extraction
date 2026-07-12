@@ -1,7 +1,8 @@
 ﻿"""标的浏览 API"""
 
+import ipaddress
 from typing import Any, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -258,6 +259,30 @@ _CONTENT_TYPES = {
 }
 
 
+def _is_safe_proxy_url(url: str) -> bool:
+    """只允许代理公网 http(s) 资源，避免把后台变成内网探测入口。"""
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    hostname = (parsed.hostname or "").strip().lower()
+    if not hostname:
+        return False
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        return True
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
 @router.get("/resource/{resource_id}/proxy")
 async def proxy_resource(
     resource_id: int,
@@ -281,6 +306,8 @@ async def proxy_resource(
     url = (row.get("resource_url") or "").strip()
     if not url:
         raise HTTPException(400, "资源 URL 为空")
+    if not _is_safe_proxy_url(url):
+        raise HTTPException(403, "不允许代理本地或内网资源 URL")
 
     name = row.get("resource_name") or ""
     fmt = row.get("resource_format") or ""
@@ -311,7 +338,7 @@ async def proxy_resource(
 
     try:
         client = httpx.AsyncClient(
-            timeout=30, follow_redirects=True, verify=False,
+            timeout=30, follow_redirects=True,
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "*/*",
