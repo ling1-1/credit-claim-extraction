@@ -2749,8 +2749,7 @@ class CquaeBrowserFetcher:
         except Exception as exc:
             raise RuntimeError("Playwright is required for CQUAE browser fallback") from exc
 
-        self._playwright = sync_playwright()
-        self._playwright.__enter__()
+        self._playwright = sync_playwright().start()
         p = self._playwright
         if self.profile_path:
             self._context = p.chromium.launch_persistent_context(

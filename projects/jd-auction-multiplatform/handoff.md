@@ -839,3 +839,65 @@ $html = Get-Content -Raw -Encoding UTF8 web_admin\static\index.html; $m = [regex
 - 重启后刷新批次列表，会自动把没有对应后台任务的旧 `running` 批次标记为 `stopped`。
 - 不需要清空或重建数据库。
 - 如果 CQUAE 后续仍然 0 条，需要继续看 CQUAE adapter 的浏览器页面、列表接口、登录/反爬状态，而不是先清库。
+
+## 20. 2026-07-12 补充：定位并修复 CQUAE 全量长时间 0 入库
+
+本轮用户反馈：
+- 重庆产权批次长时间运行后仍然 0 条，最后显示 stopped。
+
+排查证据：
+- 当前系统进程里只有 Web 管理台，没有对应的 `multi_platform_runner.py crawl --platform cquae` 采集进程。
+- 直接请求 CQUAE 列表页返回 `521` WAF 挑战，普通 requests 不能拿列表。
+- 浏览器 fallback 能通过 WAF，最小列表诊断成功解析到项目 `1342433`。
+- 最小入库采集成功：
+  ```powershell
+  python multi_platform_runner.py crawl --platform cquae --mode sample --limit 1 --ai-mode off --item-concurrency 1 --request-timeout 30 --browser-timeout-ms 60000 --cquae-page-size 15 --cquae-max-pages 1 --cquae-browser-settle-ms 1200 --cquae-profile-path "F:\codex_project\jd\.browser\cquae"
+  ```
+  结果：`scanned_count=1, success_count=1, failed_count=0`。
+
+根因：
+- CQUAE 不是完全采集不了，而是全量模式之前走通用 runner 路径：
+  1. 先执行 `handler.fetch_list(0)` 拉完整列表；
+  2. 等完整列表全部拉完后才开始详情采集和入库。
+- CQUAE 当前被 WAF 拦截，必须走浏览器 fallback；单页列表渲染就比较慢。
+- 因此全量采集会长时间停在“列表预取阶段”，前端看到标的数一直为 0。
+- 如果此时服务重启或手动停止，就会留下 `summary_json.status=running` 但无真实采集成果的批次。
+
+本轮已修改：
+- `multi_platform_runner.py`
+  - runner 新增对 `handler.iter_list_pages()` 的流式采集支持。
+  - 支持按页拉列表、按页处理详情、按条入库、按页/按条更新 checkpoint。
+  - 有流式接口的平台不再必须等待完整列表预取完成。
+- `CquaeLiveHandler`
+  - 新增 `iter_list_pages()`。
+  - 原 `fetch_list()` 保留，改为消费 `iter_list_pages()`，兼容旧调用。
+  - CQUAE 全量采集现在可以第一页拿到项目后就开始详情采集和入库。
+- `platform_adapters/cquae_adapter.py`
+  - 修复 `CquaeBrowserFetcher._ensure_playwright()` 使用 `sync_playwright()` 上下文管理器对象而不是真正 Playwright 对象的问题。
+  - 修复后 Playwright 能正常启动；但当前 CQUAE headless Playwright 仍拿到 WAF 页，实际仍可能降级到 Selenium。
+- `tests/test_multi_platform_runner.py`
+  - 新增回归测试 `test_full_mode_streams_pages_before_complete_list_is_available`，确保支持流式接口的平台不会再调用 `fetch_list(0)` 做完整预取。
+  - 新增回归测试 `test_cquae_browser_fetcher_uses_started_playwright_object`，防止 Playwright 启动对象再次用错。
+
+已验证：
+```powershell
+python -m pytest tests/test_multi_platform_runner.py::MultiPlatformRunnerTests::test_full_mode_streams_pages_before_complete_list_is_available tests/test_multi_platform_runner.py::MultiPlatformRunnerTests::test_cquae_browser_fallback_reports_persistent_waf tests/test_multi_platform_runner.py::MultiPlatformRunnerTests::test_cquae_handler_does_not_fallback_to_sdcqjy -q
+python multi_platform_runner.py crawl --platform cquae --mode sample --limit 1 --ai-mode off --item-concurrency 1 --request-timeout 30 --browser-timeout-ms 60000 --cquae-page-size 15 --cquae-max-pages 1 --cquae-browser-settle-ms 1200 --cquae-profile-path "F:\codex_project\jd\.browser\cquae"
+python -m pytest tests -q
+python -m compileall -q multi_platform_runner.py jd_scraper_v2.py jd_mysql_store.py web_admin platform_adapters _extract_ali_tk_token.py
+$html = Get-Content -Raw -Encoding UTF8 web_admin\static\index.html; $m = [regex]::Match($html, '(?s)<script>(.*)</script>'); Set-Content -Path _tmp_frontend_script.js -Value $m.Groups[1].Value -Encoding UTF8; node --check _tmp_frontend_script.js; Remove-Item _tmp_frontend_script.js
+```
+
+验证结果：
+- 新增流式回归测试通过。
+- Playwright 启动对象回归测试通过。
+- 真实 CQUAE sample 采集 1 条成功。
+- 全量测试通过：186 passed, 1 warning, 10 subtests passed。
+- `compileall` 通过。
+- 前端 `<script>` 提取后 `node --check` 通过。
+
+注意事项：
+- 这次诊断命令写入了一个 CQUAE sample 批次，并更新了 CQUAE 默认 checkpoint；没有清库、删表或重建数据库。
+- 正在运行的 Web 服务需要重启后才会使用新的流式采集代码。
+- CQUAE 单页浏览器 fallback 仍然偏慢；这次修复解决“长时间 0 入库”，不等于已经解决“全量采集很快”。
+- 如果后续要提速，优先方向是解决 CQUAE WAF 下 headless Playwright 返回挑战页的问题，或改用稳定官方/API 数据源；不要先扩大并发。

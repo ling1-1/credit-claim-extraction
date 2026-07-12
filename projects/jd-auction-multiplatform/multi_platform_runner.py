@@ -748,6 +748,7 @@ class MultiPlatformRunner:
         result.batch_id = batch_id
         full_list_for_fp: list[Any] = []
         list_items: list[Any] = []
+        streamed_list = False
 
         try:
             self._save_crawl_checkpoint(
@@ -830,14 +831,58 @@ class MultiPlatformRunner:
                 if resume_enabled:
                     result.skipped_existing += checkpoint_seen
             else:
-                list_items = handler.fetch_list(0 if normalized_mode == "full" else limit)
-                full_list_for_fp = list(list_items)
-                result.list_total = len(list_items)
-                if resume_enabled:
-                    list_items = _items_after_checkpoint(list_items, checkpoint)
-                    result.skipped_existing = checkpoint_seen
+                iter_list_pages = getattr(handler, "iter_list_pages", None)
+                if callable(iter_list_pages):
+                    streamed_list = True
+                    stream_limit = 0 if normalized_mode == "full" else limit
+                    checkpoint_found = not resume_enabled
+                    if resume_enabled:
+                        result.skipped_existing = checkpoint_seen
+                    stop_stream = False
+                    for page_no, page_items in enumerate(iter_list_pages(stream_limit), start=1):
+                        page_items = list(page_items or [])
+                        if not page_items:
+                            continue
+                        full_list_for_fp.extend(page_items)
+                        result.list_total += len(page_items)
+                        self._save_crawl_checkpoint(
+                            platform=platform, batch_id=batch_id, mode=normalized_mode, status="running",
+                            category_key=category_key, current_page=page_no,
+                            total_items_seen=checkpoint_seen + processed_since_start,
+                            last_item_id=last_processed_id, message="streaming list page",
+                        )
+                        for list_item in page_items:
+                            item_id = _list_item_id(list_item)
+                            if resume_enabled and not checkpoint_found:
+                                if item_id == checkpoint_last_id:
+                                    checkpoint_found = True
+                                continue
+                            self._crawl_list_item(handler, batch_id, list_item, result)
+                            processed_since_start += 1
+                            result.scanned_count += 1
+                            last_processed_id = item_id or last_processed_id
+                            self._save_crawl_checkpoint(
+                                platform=platform, batch_id=batch_id, mode=normalized_mode, status="running",
+                                category_key=category_key, current_page=page_no,
+                                total_items_seen=checkpoint_seen + processed_since_start,
+                                last_item_id=last_processed_id, message="crawl progress",
+                            )
+                            if stream_limit and result.scanned_count >= stream_limit:
+                                stop_stream = True
+                                break
+                        if stop_stream:
+                            break
+                    list_items = []
+                else:
+                    list_items = handler.fetch_list(0 if normalized_mode == "full" else limit)
+                    full_list_for_fp = list(list_items)
+                    result.list_total = len(list_items)
+                    if resume_enabled:
+                        list_items = _items_after_checkpoint(list_items, checkpoint)
+                        result.skipped_existing = checkpoint_seen
 
-            result.scanned_count = len(list_items)
+            if not streamed_list:
+                result.scanned_count = len(list_items)
             if eff_concurrency <= 1 or len(list_items) <= 1:
                 for list_item in list_items:
                     self._crawl_list_item(handler, batch_id, list_item, result)
@@ -1809,13 +1854,22 @@ class CquaeLiveHandler:
 
     def fetch_list(self, limit: int) -> list[CquaeListItem]:
         items: list[CquaeListItem] = []
+        for page_items in self.iter_list_pages(limit):
+            items.extend(page_items)
+            if limit and len(items) >= limit:
+                return items[:limit]
+        if items:
+            print(f"[CQUAE] fetched {len(items)} list items")
+        return items
+
+    def iter_list_pages(self, limit: int = 0):
         seen: set[str] = set()
         # Same asset may be listed under multiple project IDs on CQUAE.
         # Deduplicate by (title, price) to avoid collecting the same item
         # multiple times with different source_item_id values.
-        seen_title_price: set[tuple[str, str]] = set()
         first_error: Optional[Exception] = None
         max_pages = self.max_pages if self.max_pages > 0 else (1000 if not limit else 20)
+        yielded = 0
 
         # 閲囬泦涓ょ被鐩細浜ф潈杞(projectID=1)銆佽祫浜ц浆璁?projectID=3)
         # 浜ф潈杞闇瑕嗙洊"姝ｅ紡鎶湶"+"棰勬姭闇?锛歯t=1/nt=8 鍧囦负姝ｅ紡鎶湶鎬?閮ㄥ垎閲嶅彔),
@@ -1836,13 +1890,19 @@ class CquaeLiveHandler:
                 page_items = self.adapter.parse_list_html(html, base_url=CQUAE_BASE_URL)
                 print(f"[CQUAE] {category_label} (projectID={project_id}, nt={nt_val}) page 1 returned {len(page_items)} items")
                 if page_items:
+                    fresh_items: list[CquaeListItem] = []
                     for item in page_items:
                         if item.source_item_id in seen:
                             continue
                         seen.add(item.source_item_id)
-                        items.append(item)
-                        if limit and len(items) >= limit:
-                            return items
+                        fresh_items.append(item)
+                        yielded += 1
+                        if limit and yielded >= limit:
+                            break
+                    if fresh_items:
+                        yield fresh_items
+                    if limit and yielded >= limit:
+                        return
                     # 灏濊瘯 URL 缈婚〉锛坧age=2,3,鈥︼級
                     for page in range(2, max_pages + 1):
                         url = self.adapter.build_list_url(page=page, page_size=self.page_size, project_id=project_id, nt=nt, price_id=32)
@@ -1854,34 +1914,38 @@ class CquaeLiveHandler:
                         if not page_items2:
                             break
                         print(f"[CQUAE] {category_label} (projectID={project_id}, nt={nt_val}) page {page} returned {len(page_items2)} items")
-                        added = 0
+                        fresh_items = []
                         for item in page_items2:
                             if item.source_item_id in seen:
                                 continue
                             seen.add(item.source_item_id)
-                            items.append(item)
-                            added += 1
-                            if limit and len(items) >= limit:
-                                return items
-                        if added == 0:
+                            fresh_items.append(item)
+                            yielded += 1
+                            if limit and yielded >= limit:
+                                break
+                        if not fresh_items:
                             break
+                        yield fresh_items
+                        if limit and yielded >= limit:
+                            return
                 else:
                     # URL 缈婚〉绗竴椤靛氨杩斿洖绌?鈫?鍙兘鏄?JS 鍒嗛〉锛?
                     # 鐢?Playwright 娓叉煋鍒楄〃椤碉紝鐐瑰嚮"涓嬩竴椤?缈婚〉
                     if self.browser:
-                        items = self._fetch_list_via_browser_click(
-                            project_id, nt, category_label, items, seen, limit, max_pages
+                        browser_items = self._fetch_list_via_browser_click(
+                            project_id, nt, category_label, [], seen, limit, max_pages
                         )
+                        if browser_items:
+                            yielded += len(browser_items)
+                            yield browser_items
+                        if limit and yielded >= limit:
+                            return
             except Exception as exc:
                 if first_error is None:
                     first_error = exc
                 continue
-        if items:
-            print(f"[CQUAE] fetched {len(items)} list items")
-            return items
         if first_error:
             raise first_error
-        return items
 
     def _fetch_list_via_browser_click(
         self,

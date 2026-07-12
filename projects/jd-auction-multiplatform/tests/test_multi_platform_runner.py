@@ -1,6 +1,9 @@
 import unittest
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 import jd_scraper_v2 as jd_v2
@@ -139,6 +142,24 @@ class FullOkHandler(FakeHandler):
         source_item_id = _list_item_id(list_item)
         self.detail_calls.append(source_item_id)
         return {"id": source_item_id, "url": list_item["url"], "html": "<html>detail</html>"}
+
+
+class StreamingFullHandler(FullOkHandler):
+    def __init__(self):
+        super().__init__()
+        self.pages_yielded = 0
+
+    def fetch_list(self, limit):
+        raise AssertionError("streaming handler should not prefetch the full list")
+
+    def iter_list_pages(self, limit):
+        pages = [
+            [{"source_item_id": "ok-1", "url": "https://fake.test/items/ok-1"}],
+            [{"source_item_id": "ok-2", "url": "https://fake.test/items/ok-2"}],
+        ]
+        for page in pages:
+            self.pages_yielded += 1
+            yield page
 
 
 class FakeAIExtractor:
@@ -309,6 +330,21 @@ class MultiPlatformRunnerTests(unittest.TestCase):
         self.assertEqual(db.saved_checkpoints[-1]["last_item_id"], "ok-3")
         self.assertEqual(db.saved_checkpoints[-1]["total_items_seen"], 3)
 
+    def test_full_mode_streams_pages_before_complete_list_is_available(self):
+        db = CheckpointDB()
+        handler = StreamingFullHandler()
+        runner = MultiPlatformRunner(db=db, handlers={"fake": handler}, ai_enabled=False, item_concurrency=1)
+
+        result = runner.crawl_platform("fake", limit=0, mode="full")
+
+        self.assertEqual(handler.pages_yielded, 2)
+        self.assertEqual(handler.detail_calls, ["ok-1", "ok-2"])
+        self.assertEqual(result.success_count, 2)
+        self.assertEqual(result.scanned_count, 2)
+        self.assertEqual(len(db.common_calls), 2)
+        self.assertEqual(db.saved_checkpoints[-1]["last_item_id"], "ok-2")
+        self.assertEqual(db.saved_checkpoints[-1]["total_items_seen"], 2)
+
     def test_jd_crawl_with_db_adapter_can_write_fine_grained_checkpoint(self):
         class FakeJDAdapter:
             def crawl_sample(self, **kwargs):
@@ -377,6 +413,32 @@ class MultiPlatformRunnerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "WAF challenge"):
             handler._fetch_html("https://www.cquae.com/Project")
+
+    def test_cquae_browser_fetcher_uses_started_playwright_object(self):
+        from platform_adapters.cquae_adapter import CquaeBrowserFetcher
+
+        fake_context = SimpleNamespace()
+
+        class FakeChromium:
+            def launch(self, **kwargs):
+                return SimpleNamespace(new_context=lambda **context_kwargs: fake_context)
+
+        class FakePlaywright:
+            chromium = FakeChromium()
+
+            def stop(self):
+                return None
+
+        class FakeSyncPlaywright:
+            def start(self):
+                return FakePlaywright()
+
+        fake_module = types.ModuleType("playwright.sync_api")
+        fake_module.sync_playwright = lambda: FakeSyncPlaywright()
+
+        with patch.dict(sys.modules, {"playwright.sync_api": fake_module}):
+            fetcher = CquaeBrowserFetcher(headless=True, profile_path=None)
+            self.assertIs(fetcher._ensure_playwright(), fake_context)
 
     def test_gxcq_fetch_detail_uses_detail_api_not_spa_html(self):
         class ExplodingClient:
