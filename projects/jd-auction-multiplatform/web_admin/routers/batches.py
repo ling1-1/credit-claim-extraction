@@ -64,6 +64,43 @@ def _ai_mode(params: dict[str, Any]) -> str:
     return "async" if _as_bool(params.get("ai_enabled"), True) else "off"
 
 
+def _reconcile_stale_running_batches() -> None:
+    running_platforms = {
+        str(task.get("platform") or "")
+        for task in get_running_tasks()
+        if task.get("status") in {"running", "pending"} and task.get("platform")
+    }
+    message = "服务重启或任务超时后未找到对应后台采集进程，自动标记为停止"
+    if running_platforms:
+        placeholders = ", ".join(["%s"] * len(running_platforms))
+        execute(
+            _config,
+            f"""
+            UPDATE crawl_batches
+            SET status='stopped',
+                finished_at=NOW(),
+                message=CONCAT(IFNULL(message, ''), %s)
+            WHERE status='running'
+              AND TIMESTAMPDIFF(SECOND, started_at, NOW()) > 300
+              AND source_platform NOT IN ({placeholders})
+            """,
+            [f" | {message}", *sorted(running_platforms)],
+        )
+        return
+    execute(
+        _config,
+        """
+        UPDATE crawl_batches
+        SET status='stopped',
+            finished_at=NOW(),
+            message=CONCAT(IFNULL(message, ''), %s)
+        WHERE status='running'
+          AND TIMESTAMPDIFF(SECOND, started_at, NOW()) > 300
+        """,
+        (f" | {message}",),
+    )
+
+
 @router.get("")
 def list_batches(
     page: int = 1,
@@ -74,6 +111,7 @@ def list_batches(
     to_date: str = "",
 ):
     """列出采集批次."""
+    _reconcile_stale_running_batches()
     where: list[str] = []
     params: list[Any] = []
     if platform:

@@ -116,6 +116,33 @@ def _update_job_run(
         pass
 
 
+def _mark_latest_running_crawl_batch(
+    config: Optional[WebConfig],
+    platform: str,
+    status: str,
+    message: str,
+) -> None:
+    if not config or not platform:
+        return
+    try:
+        execute(
+            config,
+            """
+            UPDATE crawl_batches
+            SET status=%s,
+                finished_at=NOW(),
+                message=CONCAT(IFNULL(message, ''), %s)
+            WHERE source_platform=%s
+              AND status='running'
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (status, f" | {message}", platform),
+        )
+    except Exception:
+        pass
+
+
 def _run_async(
     task_id: str,
     cmd: list[str],
@@ -146,7 +173,10 @@ def _run_async(
                 _running_tasks[task_id]["status"] = "running"
                 _running_tasks[task_id]["started_at"] = time.time()
 
-        stdout, stderr = proc.communicate(timeout=timeout)
+        if timeout and timeout > 0:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        else:
+            stdout, stderr = proc.communicate()
         rc = proc.returncode
         status = "completed" if rc == 0 else "failed"
         with _lock:
@@ -175,6 +205,16 @@ def _run_async(
                 _running_tasks[task_id]["updated_at"] = time.time()
     finally:
         _update_job_run(config, run_id, status, rc, stdout, stderr)
+        with _lock:
+            task_info = dict(_running_tasks.get(task_id) or {})
+        if task_info.get("type") == "crawl" and status in {"failed", "timeout", "stopped"}:
+            platform = str(task_info.get("platform") or "")
+            _mark_latest_running_crawl_batch(
+                config,
+                platform,
+                "failed" if status == "failed" else "stopped",
+                f"后台采集任务{status}，已同步终止遗留 running 批次",
+            )
 
 
 def trigger_crawl(
@@ -243,6 +283,8 @@ def trigger_crawl(
             profile_path,
         ])
 
+    effective_timeout = 0 if platform == "cquae" and mode == "full" else config.task_timeout
+
     with _lock:
         _running_tasks[task_id] = {
             "type": "crawl",
@@ -256,12 +298,12 @@ def trigger_crawl(
             "cmd": cmd,
             "status": "pending",
             "started_at": 0,
-            "timeout": config.task_timeout,
+            "timeout": effective_timeout,
         }
 
     thread = threading.Thread(
         target=_run_async,
-        args=(task_id, cmd, config.project_root, config.task_timeout, config, run_id),
+        args=(task_id, cmd, config.project_root, effective_timeout, config, run_id),
         daemon=True,
     )
     thread.start()

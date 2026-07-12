@@ -1,4 +1,7 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -22,15 +25,19 @@ class WebAdminAuthTests(unittest.TestCase):
         return TestClient(app)
 
     def test_auth_disabled_keeps_local_api_open(self):
-        client = self._make_app(WebConfig(auth_enabled=False))
+        with TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {}, clear=True):
+                client = self._make_app(WebConfig(project_root=tmp, auth_enabled=False))
 
         self.assertEqual(client.get("/api/private").status_code, 200)
         self.assertEqual(client.get("/api/auth/status").json()["enabled"], False)
 
     def test_auth_enabled_requires_login_for_api(self):
-        client = self._make_app(
-            WebConfig(auth_enabled=True, admin_username="admin", admin_password="secret")
-        )
+        with TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {}, clear=True):
+                client = self._make_app(
+                    WebConfig(project_root=tmp, auth_enabled=True, admin_username="admin", admin_password="secret")
+                )
 
         self.assertEqual(client.get("/api/private").status_code, 401)
 
@@ -40,9 +47,11 @@ class WebAdminAuthTests(unittest.TestCase):
         self.assertEqual(client.get("/api/private").status_code, 200)
 
     def test_auth_enabled_rejects_bad_password(self):
-        client = self._make_app(
-            WebConfig(auth_enabled=True, admin_username="admin", admin_password="secret")
-        )
+        with TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {}, clear=True):
+                client = self._make_app(
+                    WebConfig(project_root=tmp, auth_enabled=True, admin_username="admin", admin_password="secret")
+                )
 
         login = client.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
         self.assertEqual(login.status_code, 401)
@@ -61,3 +70,20 @@ class DatabaseResetSafetyTests(unittest.TestCase):
         from jd_mysql_store import require_db_reset_allowed
 
         require_db_reset_allowed({"ALLOW_DB_RESET": "1"})
+
+
+class WebConfigEnvFileTests(unittest.TestCase):
+    def test_web_config_loads_project_env_file(self):
+        with TemporaryDirectory() as tmp:
+            Path(tmp, ".env").write_text(
+                "WEB_ADMIN_AUTH_ENABLED=true\n"
+                "WEB_ADMIN_ADMIN_USERNAME=local-admin\n"
+                "WEB_ADMIN_ADMIN_PASSWORD=local-secret\n",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                cfg = WebConfig(project_root=tmp)
+
+        self.assertTrue(cfg.auth_enabled)
+        self.assertEqual(cfg.admin_username, "local-admin")
+        self.assertEqual(cfg.admin_password, "local-secret")

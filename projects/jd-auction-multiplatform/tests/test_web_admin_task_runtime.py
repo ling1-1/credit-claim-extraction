@@ -104,6 +104,49 @@ class WebAdminTaskRuntimeTests(unittest.TestCase):
         for flag, value in expected.items():
             self.assertIn(flag, cmd)
             self.assertEqual(cmd[cmd.index(flag) + 1], value)
+        self.assertEqual(threads[0].args[3], 0)
+
+    def test_run_async_marks_latest_running_crawl_batch_on_timeout(self):
+        config = WebConfig(project_root="F:\\codex_project\\jd", task_timeout=1)
+        calls = []
+
+        class FakeProcess:
+            returncode = None
+
+            def communicate(self, timeout=None):
+                raise task_trigger.subprocess.TimeoutExpired(["python"], timeout)
+
+            def kill(self):
+                return None
+
+            def poll(self):
+                return None
+
+        task_trigger._running_tasks["task-1"] = {
+            "type": "crawl",
+            "platform": "cquae",
+            "status": "pending",
+            "timeout": 1,
+        }
+
+        with patch.object(task_trigger.subprocess, "Popen", return_value=FakeProcess()):
+            with patch.object(task_trigger, "execute", lambda cfg, sql, params=None: calls.append((sql, params)), create=True):
+                task_trigger._run_async("task-1", ["python", "-V"], ".", 1, config, None)
+
+        self.assertTrue(any("UPDATE crawl_batches" in sql for sql, _params in calls))
+        self.assertTrue(any(params and params[0] == "stopped" and params[2] == "cquae" for _sql, params in calls))
+
+    def test_list_batches_marks_stale_running_batches_when_no_task_exists(self):
+        calls = []
+
+        batches.init(WebConfig(project_root="F:\\codex_project\\jd"))
+        with patch.object(batches, "get_running_tasks", return_value=[]):
+            with patch.object(batches, "execute", lambda cfg, sql, params=None: calls.append((sql, params))):
+                with patch.object(batches, "query_one", return_value={"cnt": 0}):
+                    with patch.object(batches, "query_all", return_value=[]):
+                        batches.list_batches()
+
+        self.assertTrue(any("UPDATE crawl_batches" in sql and "status='stopped'" in sql for sql, _params in calls))
 
     def test_run_async_updates_crawl_job_run_when_subprocess_finishes(self):
         config = WebConfig(project_root="F:\\codex_project\\jd", task_timeout=30)

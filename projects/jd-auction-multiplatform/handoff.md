@@ -787,3 +787,55 @@ F:\codex_project\credit-claim-extraction\projects\jd-auction-multiplatform
 - 不同步 `.env`。
 - 不同步 `outputs/`、日志、缓存、`__pycache__`、浏览器 profile、数据库导出。
 - 根仓库 README 只补项目入口，不覆盖原债权图片提取说明。
+
+## 19. 2026-07-12 补充：修复认证未生效和 CQUAE 假 running 批次
+
+本轮用户反馈：
+- 重启服务后没有出现登录页。
+- 重庆产权全量采集长时间 running，但标的数一直为 0。
+
+排查结论：
+- `WEB_ADMIN_AUTH_ENABLED`、管理员用户名、管理员密码已经写在本机 `.env`，但 `web_admin.config.WebConfig` 之前只读取进程环境变量，不读取项目 `.env`，所以直接 `python -m web_admin.main --port 8000` 启动时认证仍为关闭。
+- 批次表里最新 CQUAE 记录显示 `running`，但系统进程中没有对应的 `multi_platform_runner.py crawl --platform cquae` 进程，属于服务重启/后台任务超时后遗留的僵尸 running 批次。
+- `web_admin.services.task_trigger._run_async()` 对后台子进程使用 `config.task_timeout`，默认 600 秒。CQUAE 全量采集本身可能运行很久，且命令已经设置 `--request-timeout 0 --browser-timeout-ms 0`，因此后台任务超时会提前杀掉采集器。
+- 超时后只更新了内存任务状态，没有同步更新 `crawl_batches`，导致前端批次页显示“仍在运行”。
+
+本轮已修改：
+- `web_admin/config.py`
+  - 新增项目 `.env` 读取，支持 `WEB_ADMIN_*` 配置从 `F:\codex_project\jd\.env` 生效。
+  - 已验证不会输出或提交 `.env` 中的密码、密钥。
+- `web_admin/services/task_trigger.py`
+  - CQUAE 全量采集后台任务超时改为 `0`，不再被 Web 管理台默认 600 秒超时杀掉。
+  - `_run_async()` 支持 `timeout=0` 时等待子进程自然结束。
+  - 后台采集任务 `failed` / `timeout` / `stopped` 时，同步把最新仍为 `running` 的对应平台批次标记为 `stopped` 或 `failed`，避免前端显示假 running。
+- `web_admin/routers/batches.py`
+  - 批次列表查询前自动巡检超过 300 秒且没有对应内存任务的 `running` 批次，并标记为 `stopped`。
+  - 这用于修复服务重启后内存任务丢失、数据库批次仍显示 running 的情况。
+- `tests/test_web_admin_auth.py`
+  - 新增 `.env` 读取认证配置的回归测试。
+  - 认证单元测试隔离本机 `.env`，避免本机配置污染测试。
+- `tests/test_web_admin_task_runtime.py`
+  - 新增 CQUAE 全量采集后台 timeout=0 的回归测试。
+  - 新增后台任务超时后同步停止遗留 running 批次的回归测试。
+  - 新增批次列表自动清理僵尸 running 批次的回归测试。
+
+已验证：
+```powershell
+python -m pytest tests/test_web_admin_auth.py::WebConfigEnvFileTests::test_web_config_loads_project_env_file tests/test_web_admin_task_runtime.py::WebAdminTaskRuntimeTests::test_trigger_crawl_cquae_full_uses_latest_browser_defaults tests/test_web_admin_task_runtime.py::WebAdminTaskRuntimeTests::test_run_async_marks_latest_running_crawl_batch_on_timeout tests/test_web_admin_task_runtime.py::WebAdminTaskRuntimeTests::test_list_batches_marks_stale_running_batches_when_no_task_exists -q
+python -m pytest tests -q
+python -m compileall -q multi_platform_runner.py jd_scraper_v2.py jd_mysql_store.py web_admin platform_adapters _extract_ali_tk_token.py
+$html = Get-Content -Raw -Encoding UTF8 web_admin\static\index.html; $m = [regex]::Match($html, '(?s)<script>(.*)</script>'); Set-Content -Path _tmp_frontend_script.js -Value $m.Groups[1].Value -Encoding UTF8; node --check _tmp_frontend_script.js; Remove-Item _tmp_frontend_script.js
+```
+
+验证结果：
+- 定向回归测试通过：4 passed。
+- 全量测试通过：184 passed, 1 warning, 10 subtests passed。
+- `compileall` 通过。
+- 前端 `<script>` 提取后 `node --check` 通过。
+- 本机 `WebConfig()` 验证结果：`auth_enabled=True`，且 `admin_password_set=True`。
+
+部署/使用注意：
+- 这次代码改动不会热更新已经运行中的 Web 服务。需要重启 `python -m web_admin.main --port 8000` 后登录页才会出现。
+- 重启后刷新批次列表，会自动把没有对应后台任务的旧 `running` 批次标记为 `stopped`。
+- 不需要清空或重建数据库。
+- 如果 CQUAE 后续仍然 0 条，需要继续看 CQUAE adapter 的浏览器页面、列表接口、登录/反爬状态，而不是先清库。

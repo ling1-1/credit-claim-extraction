@@ -10,6 +10,22 @@ def _env_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _load_env_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            values[key] = value
+    return values
+
+
 @dataclass
 class WebConfig:
     host: str = "127.0.0.1"
@@ -49,6 +65,7 @@ class WebConfig:
     def __post_init__(self) -> None:
         if not self.project_root:
             self.project_root = str(Path(__file__).resolve().parent.parent)
+        env_file_values = _load_env_file(Path(self.project_root) / ".env")
 
         int_keys = {
             "port",
@@ -85,7 +102,10 @@ class WebConfig:
             "auth_cookie_secure",
         )
         for key in env_keys:
-            env_val = os.environ.get(f"WEB_ADMIN_{key.upper()}")
+            env_name = f"WEB_ADMIN_{key.upper()}"
+            env_val = os.environ.get(env_name)
+            if env_val is None:
+                env_val = env_file_values.get(env_name)
             if env_val is None or env_val == "":
                 continue
             if key in int_keys:
